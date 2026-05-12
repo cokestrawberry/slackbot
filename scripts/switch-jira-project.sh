@@ -12,6 +12,8 @@
 #
 # 변경 후 Spring Boot 재시작이 필요합니다.
 
+set -euo pipefail
+
 ENV_FILE="${ENV_FILE:-.env}"
 
 RED='\033[0;31m'

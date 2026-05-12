@@ -59,6 +59,11 @@ backup_and_link() {
   local target="$2"
   local name="$(basename "$target")"
 
+  if [ ! -e "$source" ]; then
+    echo "  Skipped: $name (source not present at $source)"
+    return 0
+  fi
+
   if [ -L "$target" ]; then
     echo "  Removing existing symlink: $name"
     rm "$target"

@@ -3,7 +3,7 @@
 ## 1) `.env` 작성
 
 ```bash
-cd /Users/kim-yeonghyeon/Desktop/slackbot
+cd "$(git rev-parse --show-toplevel)"
 cp .env.example .env
 vi .env   # 또는 code .env, nano .env
 ```
@@ -52,7 +52,7 @@ echo 'ping' | claude -p --output-format json \
 ### Terminal #1 — PostgreSQL
 
 ```bash
-cd /Users/kim-yeonghyeon/Desktop/slackbot
+cd "$(git rev-parse --show-toplevel)"
 docker compose up -d postgres
 docker compose ps
 # STATE: healthy 확인
@@ -61,7 +61,7 @@ docker compose ps
 ### Terminal #2 — Spring Boot
 
 ```bash
-cd /Users/kim-yeonghyeon/Desktop/slackbot
+cd "$(git rev-parse --show-toplevel)"
 set -a && source .env && set +a
 ./gradlew bootRun
 # Started SlackbotServerApplication in X.XXX seconds
@@ -77,7 +77,7 @@ curl http://localhost:8080/health
 ### Terminal #3 — Go Bot Proxy
 
 ```bash
-cd /Users/kim-yeonghyeon/Desktop/slackbot/bot
+cd "$(git rev-parse --show-toplevel)/bot"
 set -a && source ../.env && set +a
 go run .
 # listening on :3000, forwarding to http://localhost:8080/api/slack/event

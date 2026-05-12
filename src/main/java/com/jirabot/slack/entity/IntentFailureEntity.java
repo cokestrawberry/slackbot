@@ -1,5 +1,6 @@
 package com.jirabot.slack.entity;
 
+import com.jirabot.slack.util.SensitiveDataMasker;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -37,9 +38,11 @@ public class IntentFailureEntity {
 
     public IntentFailureEntity(String rawInput, String errorType, String errorDetail,
                                String slackUserId, String slackChannel) {
-        this.rawInput = rawInput;
+        // STUDY: rawInput은 Slack 사용자가 붙여넣은 임의 텍스트이므로 토큰/이메일 leak 우려가 있다.
+        //        영속화 전에 잘 알려진 비밀정보 패턴은 마스킹한다.
+        this.rawInput = SensitiveDataMasker.mask(rawInput);
         this.errorType = errorType;
-        this.errorDetail = errorDetail;
+        this.errorDetail = SensitiveDataMasker.mask(errorDetail);
         this.slackUserId = slackUserId;
         this.slackChannel = slackChannel;
         this.failedAt = Instant.now();
