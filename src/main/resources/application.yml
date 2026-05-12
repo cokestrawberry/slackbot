@@ -1,0 +1,62 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: slackbot-server
+  # STUDY: Spring Boot는 application.yml/properties에서 ${VAR:default} 로 env var 주입 가능.
+  datasource:
+    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:jirabot}
+    username: ${POSTGRES_USER:jirabot}
+    password: ${POSTGRES_PASSWORD:jirabot}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    # STUDY: ddl-auto=update는 개발용. 운영에서는 Flyway/Liquibase + validate 권장 (Phase 5).
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+# Slack 설정 — security-config-engineer가 signing-secret 사용
+slack:
+  signing-secret: ${SLACK_SIGNING_SECRET:}
+  bot-token: ${SLACK_BOT_TOKEN:}
+  # STUDY: 허용 채널 목록. 비어있으면 모든 채널 허용. 쉼표로 구분.
+  allowed-channels: ${SLACK_ALLOWED_CHANNELS:}
+
+# Claude Code CLI 설정 — ClaudeApiClient 가 `claude -p` 서브프로세스로 호출.
+# 별도 API Key 불필요 (구독 계정 재사용). CLI 인증은 `claude login` 으로 사전 수행.
+claude:
+  cli-path: ${CLAUDE_CLI_PATH:claude}
+  model: claude-sonnet-4-5
+  timeout-seconds: 60
+  permission-mode: plan
+  max-turns: 1
+  # STUDY: Haiku 의도 분류기 설정. --bare로 불필요한 컨텍스트 스킵, --system-prompt-file로 skill 전달.
+  intent:
+    model: claude-haiku-4-5
+    timeout-seconds: 15
+    prompt-file: prompts/haiku-classifier.md
+
+# Jira 설정 — spring-service-engineer의 JiraApiClient
+jira:
+  base-url: ${JIRA_BASE_URL:}
+  email: ${JIRA_EMAIL:}
+  api-token: ${JIRA_API_TOKEN:}
+  project-key: ${JIRA_PROJECT_KEY:}
+
+# STUDY: Actuator. /actuator/health = 헬스체크. Phase 1에서는 별도 /health 컨트롤러도 제공.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.jirabot.slack: DEBUG
+    org.springframework.security: DEBUG

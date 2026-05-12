@@ -1,0 +1,8 @@
+// STUDY: Foojay Toolchain Resolver — Gradle이 Java Toolchain(JavaLanguageVersion)을
+// 시스템에서 찾지 못하면 Foojay Disco API를 통해 자동 다운로드해 사용.
+// build.gradle의 `java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }`와 짝.
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
+}
+
+rootProject.name = 'slackbot-server'

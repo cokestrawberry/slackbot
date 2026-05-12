@@ -1,0 +1,34 @@
+package com.jirabot.slack.client;
+
+import java.util.List;
+
+public interface SlackNotifier {
+
+    /**
+     * Slack 채널의 특정 스레드에 메시지를 남긴다.
+     *
+     * @param channel  채널 ID
+     * @param threadTs 스레드 부모 메시지의 ts (스레드 댓글로 달림)
+     * @param text     메시지 본문
+     */
+    void postThreadReply(String channel, String threadTs, String text);
+
+    void postMessage(String channel, String text);
+
+    /**
+     * Slack 유저 ID로 실명(real_name)을 조회한다.
+     *
+     * @param userId Slack 유저 ID (예: U03L1TJ0EBB)
+     * @return 실명, 실패 시 null
+     */
+    String getUserRealName(String userId);
+
+    /**
+     * Read all messages in a Slack thread.
+     *
+     * @param channel channel ID
+     * @param threadTs parent message timestamp
+     * @return list of message texts (oldest first), empty list on failure
+     */
+    List<String> getThreadMessages(String channel, String threadTs);
+}

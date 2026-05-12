@@ -1,0 +1,30 @@
+# STUDY: @SpringBootTest + @ActiveProfiles("test") 조합으로 로드됨.
+# 풀 컨텍스트 부팅 시 실제 Postgres 대신 H2 in-memory 로 대체 — 외부 의존 없이 JPA 검증 가능.
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+
+slack:
+  signing-secret: test-signing-secret
+
+claude:
+  # /bin/true = 컨텍스트 부팅 시 실제 claude 바이너리가 설치되어 있지 않아도 통과.
+  # 실제 동작 테스트는 ProcessRunner 를 Mockito mock 으로 주입하여 수행.
+  cli-path: /bin/true
+  model: claude-sonnet-4-5
+  timeout-seconds: 5
+  permission-mode: plan
+  max-turns: 1
+
+jira:
+  base-url: http://localhost:9999
+  email: test@example.com
+  api-token: test-token
+  project-key: TEST

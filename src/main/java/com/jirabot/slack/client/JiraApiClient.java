@@ -1,0 +1,41 @@
+package com.jirabot.slack.client;
+
+import com.jirabot.slack.client.dto.IssueClassification;
+import com.jirabot.slack.client.dto.JiraCreateResponse;
+import com.jirabot.slack.client.dto.SprintInfo;
+import com.jirabot.slack.client.dto.SprintIssue;
+import java.util.List;
+import java.util.Optional;
+
+public interface JiraApiClient {
+
+    JiraCreateResponse createIssue(IssueClassification classification, String reporterSlackUserId);
+
+    Optional<SprintInfo> getActiveSprint();
+
+    List<SprintIssue> getSprintIssues(int sprintId);
+
+    /**
+     * Jira 이슈의 상태를 전환한다.
+     *
+     * @param issueKey 이슈 키 (예: SLAC-7)
+     * @param targetStatusName 목표 상태명 (예: "완료")
+     * @return 성공 여부
+     */
+    boolean transitionIssue(String issueKey, String targetStatusName);
+
+    /**
+     * Create a sub-task under a parent issue.
+     */
+    String createSubTask(String parentKey, String summary, int storyPoint);
+
+    /**
+     * Add a comment to an existing issue.
+     */
+    void addComment(String issueKey, String commentText);
+
+    /**
+     * Append text to an existing issue's description.
+     */
+    void appendDescription(String issueKey, String additionalText);
+}

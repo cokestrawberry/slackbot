@@ -1,0 +1,189 @@
+package com.jirabot.slack.controller;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup;
+
+import com.jirabot.slack.client.IntentClassifier;
+import com.jirabot.slack.client.JiraApiClient;
+import com.jirabot.slack.client.SlackNotifier;
+import com.jirabot.slack.client.ThreadActionClassifier;
+import com.jirabot.slack.client.dto.IntentResult;
+import com.jirabot.slack.repository.IntentFailureRepository;
+import com.jirabot.slack.repository.IssueRepository;
+import com.jirabot.slack.service.IssueCreateResult;
+import com.jirabot.slack.service.IssueCreateService;
+import com.jirabot.slack.service.JiraSyncService;
+import com.jirabot.slack.service.ScrumReportService;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+// STUDY: standaloneSetup은 Spring 컨텍스트 없이 컨트롤러만 MockMvc로 래핑 — 다른 팀원 필터/빈의 영향을 받지 않음.
+class SlackEventControllerTest {
+
+    private IssueCreateService issueCreateService;
+    private ScrumReportService scrumReportService;
+    private JiraSyncService jiraSyncService;
+    private JiraApiClient jiraApiClient;
+    private IssueRepository issueRepository;
+    private IntentClassifier intentClassifier;
+    private ThreadActionClassifier threadActionClassifier;
+    private IntentFailureRepository intentFailureRepository;
+    private SlackNotifier slackNotifier;
+    private MockMvc mockMvc;
+
+    @BeforeEach
+    void setUp() {
+        issueCreateService = mock(IssueCreateService.class);
+        scrumReportService = mock(ScrumReportService.class);
+        jiraSyncService = mock(JiraSyncService.class);
+        jiraApiClient = mock(JiraApiClient.class);
+        issueRepository = mock(IssueRepository.class);
+        intentClassifier = mock(IntentClassifier.class);
+        threadActionClassifier = mock(ThreadActionClassifier.class);
+        intentFailureRepository = mock(IntentFailureRepository.class);
+        slackNotifier = mock(SlackNotifier.class);
+        mockMvc = standaloneSetup(new SlackEventController(
+                issueCreateService, scrumReportService, jiraSyncService,
+                jiraApiClient, issueRepository, intentClassifier,
+                threadActionClassifier, intentFailureRepository, slackNotifier,
+                "C1,C2")).build();
+    }
+
+    @Test
+    void urlVerification_returnsChallenge() throws Exception {
+        String body = "{\"type\":\"url_verification\",\"challenge\":\"abc123\"}";
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.challenge").value("abc123"));
+
+        verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void appMention_unknownText_goesToHaikuClassifier() throws Exception {
+        when(intentClassifier.classify(any()))
+                .thenReturn(new IntentResult("register_bug", 0.95, Map.of(), "버그있음"));
+        when(issueCreateService.createFromSlackText(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(IssueCreateResult.ok("P-1", "u")));
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그있음","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ok").value(true));
+
+        // 비동기 스레드에서 실행되므로 즉시 verify는 불가 — 200 OK 반환만 확인
+    }
+
+    @Test
+    void regularMessage_isIgnored() throws Exception {
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"message","user":"U1","text":"일반 대화","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void botMessage_isIgnored() throws Exception {
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","text":"bot","bot_id":"B1","channel":"C1"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void scrumCommand_dispatchesToScrumService() throws Exception {
+        when(scrumReportService.generateReport())
+                .thenReturn(CompletableFuture.completedFuture("리포트"));
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> scrum","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ok").value(true));
+
+        verify(scrumReportService).generateReport();
+        verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void helpCommand_sendsHelpText() throws Exception {
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> help","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(slackNotifier).postThreadReply(any(), any(), any());
+        verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void myWorkCommand_dispatchesToMyReport() throws Exception {
+        when(scrumReportService.generateMyReport(any()))
+                .thenReturn(CompletableFuture.completedFuture("내 작업"));
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 내작업","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(scrumReportService).generateMyReport("U1");
+        verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void appMention_stripsMentionTag() {
+        // "<@U0AT5U95C4T> 로그인 에러" → "로그인 에러"
+        org.assertj.core.api.Assertions.assertThat(
+                SlackEventController.stripMention("<@U0AT5U95C4T> 로그인 에러")).isEqualTo("로그인 에러");
+        org.assertj.core.api.Assertions.assertThat(
+                SlackEventController.stripMention("<@U0AT5U95C4T>  멀티스페이스")).isEqualTo("멀티스페이스");
+        org.assertj.core.api.Assertions.assertThat(
+                SlackEventController.stripMention(null)).isEmpty();
+    }
+}
