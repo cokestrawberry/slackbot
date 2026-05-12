@@ -58,6 +58,12 @@ public class SlackNotifierImpl implements SlackNotifier {
                     .block();
             var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(response);
             if (node.path("ok").asBoolean(false)) {
+                // STUDY: display_name이 Jira displayName과 일치할 가능성이 높다.
+                //        display_name이 비어있으면 real_name fallback.
+                String displayName = node.path("user").path("profile").path("display_name").asText("");
+                if (!displayName.isBlank()) {
+                    return displayName;
+                }
                 return node.path("user").path("real_name").asText(null);
             }
             log.warn("Slack users.info failed: {}", node.path("error").asText());

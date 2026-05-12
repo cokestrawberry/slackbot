@@ -46,8 +46,9 @@ public class JiraApiClientImpl implements JiraApiClient {
             retryFor = JiraTransientException.class,
             maxAttempts = 3,
             backoff = @Backoff(delay = 500, multiplier = 2.0))
-    public JiraCreateResponse createIssue(IssueClassification classification, String reporterSlackUserId) {
-        JiraCreateRequest request = buildRequest(classification, reporterSlackUserId);
+    public JiraCreateResponse createIssue(IssueClassification classification, String reporterName,
+                                          String jiraAccountId) {
+        JiraCreateRequest request = buildRequest(classification, reporterName, jiraAccountId);
         try {
             JiraCreateResponse resp = jiraWebClient.post()
                     .uri("/rest/api/3/issue")
@@ -58,7 +59,7 @@ public class JiraApiClientImpl implements JiraApiClient {
             if (resp == null || resp.key() == null) {
                 throw new JiraApiException("Jira returned empty response");
             }
-            log.info("Jira issue created key={} reporter={}", resp.key(), reporterSlackUserId);
+            log.info("Jira issue created key={} reporter={}", resp.key(), reporterName);
             return resp;
         } catch (WebClientResponseException e) {
             int status = e.getStatusCode().value();
@@ -74,20 +75,48 @@ public class JiraApiClientImpl implements JiraApiClient {
         }
     }
 
-    private JiraCreateRequest buildRequest(IssueClassification c, String reporter) {
+    private JiraCreateRequest buildRequest(IssueClassification c, String reporterName,
+                                          String jiraAccountId) {
         // Jira 사이트 언어가 한국어로 생성돼 이슈 타입 name 이 "버그"/"작업" 으로 저장됨.
         // Team-managed 프로젝트 타입은 REST API 리네임 불가 → 매핑으로 처리.
         String issueTypeName = c.type() == IssueClassification.IssueType.BUG ? "버그" : "작업";
         List<String> labels = List.of("slackbot", "origin-slack", "sp-" + c.storyPoint(),
                 "claude-" + c.type().name().toLowerCase());
 
+        // STUDY: reporter/assignee는 Jira accountId로 지정. null이면 API 토큰 소유자가 기본값.
+        JiraCreateRequest.AccountRef accountRef = jiraAccountId != null
+                ? new JiraCreateRequest.AccountRef(jiraAccountId) : null;
+
         return new JiraCreateRequest(new JiraCreateRequest.Fields(
                 new JiraCreateRequest.ProjectRef(props.projectKey()),
                 c.title(),
                 new JiraCreateRequest.IssueTypeRef(issueTypeName),
-                buildAdfDescription(c, reporter),
+                buildAdfDescription(c, reporterName),
                 labels,
-                (double) c.storyPoint()));
+                (double) c.storyPoint(),
+                accountRef,
+                accountRef));
+    }
+
+    @Override
+    public String findAccountId(String displayName) {
+        try {
+            // STUDY: Jira user search API로 displayName 검색 → accountId 반환.
+            String json = jiraWebClient.get()
+                    .uri("/rest/api/3/user/search?query={name}", displayName)
+                    .retrieve().bodyToMono(String.class).block();
+            JsonNode users = objectMapper.readTree(json);
+            if (users.isArray() && !users.isEmpty()) {
+                String accountId = users.get(0).path("accountId").asText(null);
+                log.debug("Jira accountId for '{}': {}", displayName, accountId);
+                return accountId;
+            }
+            log.warn("No Jira user found for '{}'", displayName);
+            return null;
+        } catch (Exception e) {
+            log.warn("Failed to search Jira user '{}': {}", displayName, e.toString());
+            return null;
+        }
     }
 
     @Override

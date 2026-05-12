@@ -43,7 +43,7 @@ class IssueCreateServiceImplTest {
                 IssueClassification.IssueType.BUG, 2, "title", "summary");
         when(claude.classify(anyString(), any())).thenReturn(classification);
         when(duplicateDetection.findSimilar(anyString())).thenReturn(List.of());
-        when(jira.createIssue(eq(classification), eq("U123")))
+        when(jira.createIssue(eq(classification), anyString(), any()))
                 .thenReturn(new JiraCreateResponse("10001", "PROJ-1", "https://..."));
 
         var cmd = new IssueCreateCommand("login broken", "U123", "C1", "123.0");
@@ -62,7 +62,7 @@ class IssueCreateServiceImplTest {
         when(claude.classify(anyString(), any()))
                 .thenReturn(IssueClassification.fallback("x"));
         when(duplicateDetection.findSimilar(anyString())).thenReturn(List.of());
-        when(jira.createIssue(any(), anyString())).thenThrow(new JiraApiException("400 bad"));
+        when(jira.createIssue(any(), anyString(), any())).thenThrow(new JiraApiException("400 bad"));
 
         var cmd = new IssueCreateCommand("x", "U1", "C", "0");
         var result = service.createFromSlackText(cmd).get();

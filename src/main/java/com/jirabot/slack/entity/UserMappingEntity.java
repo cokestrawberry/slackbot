@@ -25,6 +25,8 @@ public class UserMappingEntity {
     @Column(nullable = false)
     private String jiraDisplayName;
 
+    private String jiraAccountId;
+
     protected UserMappingEntity() {}
 
     public UserMappingEntity(String slackUserId, String slackDisplayName, String jiraDisplayName) {
@@ -33,10 +35,19 @@ public class UserMappingEntity {
         this.jiraDisplayName = jiraDisplayName;
     }
 
+    public UserMappingEntity(String slackUserId, String slackDisplayName, String jiraDisplayName,
+                             String jiraAccountId) {
+        this.slackUserId = slackUserId;
+        this.slackDisplayName = slackDisplayName;
+        this.jiraDisplayName = jiraDisplayName;
+        this.jiraAccountId = jiraAccountId;
+    }
+
     public Long getId() { return id; }
     public String getSlackUserId() { return slackUserId; }
     public String getSlackDisplayName() { return slackDisplayName; }
     public String getJiraDisplayName() { return jiraDisplayName; }
+    public String getJiraAccountId() { return jiraAccountId; }
 
     public void setJiraDisplayName(String jiraDisplayName) {
         this.jiraDisplayName = jiraDisplayName;
@@ -44,5 +55,9 @@ public class UserMappingEntity {
 
     public void setSlackDisplayName(String slackDisplayName) {
         this.slackDisplayName = slackDisplayName;
+    }
+
+    public void setJiraAccountId(String jiraAccountId) {
+        this.jiraAccountId = jiraAccountId;
     }
 }

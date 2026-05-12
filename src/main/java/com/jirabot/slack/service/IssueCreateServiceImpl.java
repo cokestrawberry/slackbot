@@ -75,9 +75,11 @@ public class IssueCreateServiceImpl implements IssueCreateService {
                 log.info("Found {} similar issues for '{}'", similar.size(), classification.title());
             }
 
-            // STUDY: Slack 유저 ID → 실명 변환. Jira description에 실명이 표시되도록.
+            // STUDY: Slack 유저 ID → 실명 + Jira accountId 변환.
+            //        reporter/assignee 모두 이슈 등록한 사람으로 설정.
             String reporterName = resolveReporterName(command.slackUserId());
-            JiraCreateResponse created = jira.createIssue(classification, reporterName);
+            String jiraAccountId = resolveJiraAccountId(command.slackUserId(), reporterName);
+            JiraCreateResponse created = jira.createIssue(classification, reporterName, jiraAccountId);
             String url = buildIssueUrl(created.key());
             log.info("Issue created key={} url={} type={} sp={}", created.key(), url,
                     classification.type(), classification.storyPoint());
@@ -133,6 +135,30 @@ public class IssueCreateServiceImpl implements IssueCreateService {
             log.warn("Failed to resolve reporter name for {}: {}", slackUserId, e.toString());
         }
         return slackUserId;
+    }
+
+    private String resolveJiraAccountId(String slackUserId, String displayName) {
+        if (slackUserId == null) return null;
+        try {
+            // 1. DB 매핑에 accountId가 있으면 사용
+            var mapping = userMappingRepository.findBySlackUserId(slackUserId);
+            if (mapping.isPresent() && mapping.get().getJiraAccountId() != null) {
+                return mapping.get().getJiraAccountId();
+            }
+
+            // 2. Jira API로 검색하여 accountId 획득
+            String accountId = jira.findAccountId(displayName);
+            if (accountId != null && mapping.isPresent()) {
+                // 매핑에 accountId 저장 (다음번에는 API 호출 없이 사용)
+                mapping.get().setJiraAccountId(accountId);
+                userMappingRepository.save(mapping.get());
+                log.info("Saved Jira accountId for {}: {}", displayName, accountId);
+            }
+            return accountId;
+        } catch (Exception e) {
+            log.warn("Failed to resolve Jira accountId for {}: {}", slackUserId, e.toString());
+            return null;
+        }
     }
 
     private void saveToDb(String issueKey, IssueClassification c, String reporter,
