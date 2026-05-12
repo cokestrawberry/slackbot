@@ -87,8 +87,21 @@ public class IssueCreateServiceImpl implements IssueCreateService {
             notifySlack(command, created.key(), url, classification, similar);
             return CompletableFuture.completedFuture(IssueCreateResult.ok(created.key(), url));
         } catch (Exception e) {
-            log.error("Issue creation failed: {}", e.toString());
+            log.error("Issue creation failed for user={}: {}", command.slackUserId(), e.toString(), e);
+            notifyFailure(command, e);
             return CompletableFuture.completedFuture(IssueCreateResult.failure(e.getMessage()));
+        }
+    }
+
+    private void notifyFailure(IssueCreateCommand command, Exception e) {
+        if (command.channel() == null || command.eventTs() == null) {
+            return;
+        }
+        try {
+            slackNotifier.postThreadReply(command.channel(), command.eventTs(),
+                    ":x: 이슈 생성 중 오류가 발생했어요: " + e.getMessage());
+        } catch (Exception notifyEx) {
+            log.warn("Failure notification to Slack also failed: {}", notifyEx.toString());
         }
     }
 

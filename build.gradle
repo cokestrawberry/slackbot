@@ -27,6 +27,8 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-webflux'
 	// STUDY: macOS에서 Netty DNS resolver 네이티브 라이브러리. 없으면 시스템 DNS fallback은 되지만 경고 로그 반복.
 	runtimeOnly 'io.netty:netty-resolver-dns-native-macos::osx-aarch_64'
+	// STUDY: spring-retry / spring-aspects 는 Spring Boot BOM이 버전을 관리한다.
+	//        Boot 버전 업그레이드 시 자동으로 호환 버전으로 따라간다. 명시 버전을 박지 않는 것은 의도된 정책.
 	implementation 'org.springframework.retry:spring-retry'
 	implementation 'org.springframework:spring-aspects'
 	runtimeOnly 'org.postgresql:postgresql'

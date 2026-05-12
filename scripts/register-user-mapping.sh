@@ -9,6 +9,8 @@
 # Slack 유저의 실명과 Jira assignee 이름이 다를 때 사용합니다.
 # 예: Slack 실명 "Young Hyun Kim" → Jira assignee "김영현"
 
+set -eo pipefail
+
 BASE_URL="${SPRING_BASE_URL:-http://localhost:8080}"
 API_URL="${BASE_URL}/api/user-mappings"
 
@@ -34,8 +36,7 @@ show_help() {
 list_mappings() {
     echo -e "${YELLOW}등록된 매핑 목록:${NC}"
     echo ""
-    response=$(curl -s "${API_URL}")
-    if [ $? -ne 0 ]; then
+    if ! response=$(curl -s --fail "${API_URL}"); then
         echo -e "${RED}서버에 연결할 수 없습니다. Spring Boot가 실행 중인지 확인하세요.${NC}"
         exit 1
     fi
@@ -61,9 +62,9 @@ register_mapping() {
 
     response=$(curl -s -X POST "${API_URL}" \
         -H "Content-Type: application/json" \
-        -d "{\"slackUserId\": \"${slack_id}\", \"jiraDisplayName\": \"${jira_name}\"}")
+        -d "{\"slackUserId\": \"${slack_id}\", \"jiraDisplayName\": \"${jira_name}\"}") || true
 
-    status=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null)
+    status=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
 
     if [ "$status" = "created" ] || [ "$status" = "updated" ]; then
         echo -e "${GREEN}✅ 등록 완료: ${slack_id} → ${jira_name} (${status})${NC}"

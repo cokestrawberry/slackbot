@@ -59,7 +59,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.logger.Info("url_verification challenge echoed")
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"challenge": challenge.Challenge})
+		if err := json.NewEncoder(w).Encode(map[string]string{"challenge": challenge.Challenge}); err != nil {
+			h.logger.Warn("url_verification response encode failed", "err", err)
+		}
 		return
 	}
 

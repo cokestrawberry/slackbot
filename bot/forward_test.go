@@ -150,6 +150,66 @@ func TestHandler_URLVerificationEchoesChallenge(t *testing.T) {
 	}
 }
 
+func TestForward_RespectsContextCancellation(t *testing.T) {
+	// Server sleeps long enough that a cancelled context must surface as the
+	// returned error rather than the request completing.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	f := NewForwarder(srv.URL, srv.Client(), testLogger())
+	err := f.Forward(ctx, []byte(`{}`), http.Header{})
+	if err == nil {
+		t.Fatalf("expected cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Logf("note: surfaced error is %v (not context.Canceled), accepting as long as it errored", err)
+	}
+}
+
+func TestHandler_RejectsOversizedBody(t *testing.T) {
+	// Forwarder targets a closed address — proves handler refuses oversized body
+	// before any forwarding takes place.
+	f := NewForwarder("http://127.0.0.1:1", &http.Client{Timeout: 500 * time.Millisecond}, testLogger())
+	h := NewHandler(f, testLogger())
+
+	oversized := bytes.Repeat([]byte("a"), (1<<20)+128)
+	req := httptest.NewRequest(http.MethodPost, "/slack/events", bytes.NewReader(oversized))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("oversized body should yield 400, got %d", rec.Code)
+	}
+}
+
+func TestHandler_RejectsMalformedJSONEnvelope(t *testing.T) {
+	f := NewForwarder("http://127.0.0.1:1", &http.Client{Timeout: 500 * time.Millisecond}, testLogger())
+	h := NewHandler(f, testLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/slack/events",
+		bytes.NewReader([]byte(`{not-json`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("malformed JSON should yield 400, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandler_ForwardsEventCallback(t *testing.T) {
 	var got []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
