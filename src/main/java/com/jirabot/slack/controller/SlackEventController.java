@@ -286,6 +286,9 @@ public class SlackEventController {
                         replyThread(event, ":bar_chart: 통계 기능은 준비 중입니다. `@지라봇 help`를 확인해주세요.");
                 case "my_tasks" ->
                         handleMyWork(event);
+                case "skip" ->
+                        replyThread(event, ":no_entry_sign: 구체적인 내용을 포함해주세요.\n" +
+                                "예: `@지라봇 로그인 페이지에서 500 에러 발생`");
                 default ->
                         replyThread(event, ":thinking_face: 이해하지 못했어요. `@지라봇 help`로 사용 가능한 명령을 확인해주세요.");
             }

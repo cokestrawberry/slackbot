@@ -121,9 +121,12 @@ public class IssueCreateServiceImpl implements IssueCreateService {
             if (mapping.isPresent()) {
                 return mapping.get().getJiraDisplayName();
             }
-            // 매핑 없으면 Slack API로 실명 조회
+            // 매핑 없으면 Slack API로 실명 조회 + 자동 매핑 저장
             String realName = slackNotifier.getUserRealName(slackUserId);
             if (realName != null && !realName.isBlank()) {
+                userMappingRepository.save(
+                        new com.jirabot.slack.entity.UserMappingEntity(slackUserId, realName, realName));
+                log.info("Auto-mapped reporter: {} → {}", slackUserId, realName);
                 return realName;
             }
         } catch (Exception e) {
