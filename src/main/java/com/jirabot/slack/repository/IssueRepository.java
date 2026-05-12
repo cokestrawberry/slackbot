@@ -25,6 +25,9 @@ public interface IssueRepository extends JpaRepository<IssueEntity, Long> {
 
     List<IssueEntity> findByStatusCategoryNot(String statusCategory);
 
+    // STUDY: 일일 리마인더용. 특정 담당자(Jira displayName)의 미완료 이슈 목록.
+    List<IssueEntity> findByAssigneeAndStatusCategoryNot(String assignee, String statusCategory);
+
     @Query("SELECT i FROM IssueEntity i WHERE i.jiraUpdated >= :since")
     List<IssueEntity> findUpdatedSince(@Param("since") Instant since);
 

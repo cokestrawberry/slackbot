@@ -1,10 +1,13 @@
 package com.jirabot.slack.repository;
 
 import com.jirabot.slack.entity.UserMappingEntity;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface UserMappingRepository extends JpaRepository<UserMappingEntity, Long> {
 
     Optional<UserMappingEntity> findBySlackUserId(String slackUserId);
+
+    List<UserMappingEntity> findByReminderEnabledTrue();
 }

@@ -122,4 +122,11 @@ public class SlackNotifierImpl implements SlackNotifier {
             log.warn("Failed to send Slack message: {}", e.toString());
         }
     }
+
+    @Override
+    public void sendDirectMessage(String userId, String text) {
+        // STUDY: chat.postMessage 의 channel 필드에 user ID 를 넘기면 Slack 이 IM 채널을 자동 개통한다.
+        //        별도 conversations.open 호출 없이 동작 (스코프: chat:write + im:write).
+        postMessage(userId, text);
+    }
 }

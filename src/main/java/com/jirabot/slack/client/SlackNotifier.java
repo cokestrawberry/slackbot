@@ -16,6 +16,16 @@ public interface SlackNotifier {
     void postMessage(String channel, String text);
 
     /**
+     * Slack 사용자에게 DM 을 발송한다.
+     * chat.postMessage 의 channel 필드에 사용자 ID 를 넘기면 Slack 이 IM 채널을 자동 개통한다.
+     * (봇 스코프에 chat:write + im:write 필요)
+     *
+     * @param userId Slack 사용자 ID
+     * @param text   메시지 본문
+     */
+    void sendDirectMessage(String userId, String text);
+
+    /**
      * Slack 유저 ID로 실명(real_name)을 조회한다.
      *
      * @param userId Slack 유저 ID (예: U03L1TJ0EBB)
