@@ -124,16 +124,19 @@ public class JiraApiClientImpl implements JiraApiClient {
     public Optional<SprintInfo> getActiveSprint() {
         try {
             // STUDY: Jira Agile API로 프로젝트의 보드를 찾고, 활성 스프린트를 조회한다.
-            //        보드 ID는 프로젝트마다 다르므로 동적으로 조회.
+            //        type=scrum 필터로 Kanban 보드를 제외 — sprint API 는 Scrum 보드에서만 동작.
             String boardJson = jiraWebClient.get()
-                    .uri("/rest/agile/1.0/board?projectKeyOrId={key}", props.projectKey())
+                    .uri("/rest/agile/1.0/board?projectKeyOrId={key}&type=scrum", props.projectKey())
                     .retrieve().bodyToMono(String.class).block();
             JsonNode boards = objectMapper.readTree(boardJson).path("values");
             if (!boards.isArray() || boards.isEmpty()) {
-                log.warn("No board found for project {}", props.projectKey());
+                log.warn("No Scrum board found for project {}", props.projectKey());
                 return Optional.empty();
             }
-            int boardId = boards.get(0).path("id").asInt();
+            JsonNode picked = boards.get(0);
+            int boardId = picked.path("id").asInt();
+            log.info("Selected Scrum board id={} name='{}' for project {} (총 {}개 중)",
+                    boardId, picked.path("name").asText(""), props.projectKey(), boards.size());
 
             String sprintJson = jiraWebClient.get()
                     .uri("/rest/agile/1.0/board/{boardId}/sprint?state=active", boardId)
