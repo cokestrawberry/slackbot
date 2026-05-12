@@ -20,7 +20,7 @@
 ## 구현 계획
 
 - `channel_project_mappings` DB 테이블 생성
-- 매핑 등록: `@지라봇 프로젝트 설정 FRONT` 또는 scripts로 등록
+- 매핑 등록: `@지라 프로젝트 설정 FRONT` 또는 scripts로 등록
 - 이슈 생성 시 채널 ID → 프로젝트 키 조회
 - 매핑 없으면 기본 프로젝트 사용 (application.yml의 JIRA_PROJECT_KEY)
 

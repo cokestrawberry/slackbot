@@ -18,7 +18,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 // STUDY: Jira API 직접 호출에서 DB 조회로 전환. 응답 속도 대폭 개선 (API 수초 → DB 수ms).
-//        데이터 정확성은 앱 시작 시 + 매일 8시 자동 동기화 + @지라봇 sync 수동 동기화로 보장.
+//        데이터 정확성은 앱 시작 시 + 매일 8시 자동 동기화 + @지라 sync 수동 동기화로 보장.
 @Service
 public class ScrumReportServiceImpl implements ScrumReportService {
 
@@ -46,7 +46,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         try {
             List<IssueEntity> allIssues = issueRepository.findAll();
             if (allIssues.isEmpty()) {
-                return CompletableFuture.completedFuture("DB에 이슈가 없습니다. `@지라봇 sync`로 동기화해주세요.");
+                return CompletableFuture.completedFuture("DB에 이슈가 없습니다. `@지라 sync`로 동기화해주세요.");
             }
             String report = formatReport(allIssues);
             log.info("Scrum report generated from DB, issues={}", allIssues.size());
