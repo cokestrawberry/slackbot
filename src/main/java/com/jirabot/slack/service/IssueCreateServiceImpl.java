@@ -182,7 +182,7 @@ public class IssueCreateServiceImpl implements IssueCreateService {
                     issueKey, c.title(), issueType, "해야 할 일", "해야 할 일",
                     null, (double) c.storyPoint(), reporter, c.summary(),
                     Instant.now(), Instant.now());
-            // 스레드에서 "@지라 완료" 시 이슈를 찾을 수 있도록 Slack 스레드 정보 저장
+            // 스레드에서 "@봇더지라 완료" 시 이슈를 찾을 수 있도록 Slack 스레드 정보 저장
             if (command.channel() != null && command.eventTs() != null) {
                 entity.setSlackThread(command.channel(), command.eventTs());
             }

@@ -47,23 +47,23 @@ public class SlackEventController {
             :robot_face: *지라 사용법*
 
             *키워드 명령 (즉시 실행):*
-              `@지라 help` — 이 도움말 표시
-              `@지라 scrum` — 스프린트 일일 리포트
-              `@지라 내작업` — 내 진행 중인 작업 조회
-              `@지라 작업 김영현` — 특정 팀원의 작업 조회
-              `@지라 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
-              `@지라 sync` — Jira 이슈를 로컬 DB에 동기화
-              `@지라 완료` — 이슈 스레드에서 → Jira 완료 처리
+              `@봇더지라 help` — 이 도움말 표시
+              `@봇더지라 scrum` — 스프린트 일일 리포트
+              `@봇더지라 내작업` — 내 진행 중인 작업 조회
+              `@봇더지라 작업 김영현` — 특정 팀원의 작업 조회
+              `@봇더지라 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
+              `@봇더지라 sync` — Jira 이슈를 로컬 DB에 동기화
+              `@봇더지라 완료` — 이슈 스레드에서 → Jira 완료 처리
 
             *스레드 액션 (이슈 스레드에서 댓글로 사용):*
-              `@지라 하위작업 <내용>` — 하위작업 생성
-              `@지라 댓글 <내용>` — Jira 코멘트 추가
-              `@지라 수정 <내용>` — Jira 설명에 내용 추가
+              `@봇더지라 하위작업 <내용>` — 하위작업 생성
+              `@봇더지라 댓글 <내용>` — Jira 코멘트 추가
+              `@봇더지라 수정 <내용>` — Jira 설명에 내용 추가
               또는 자연어로 입력하면 AI가 액션을 판단합니다.
 
             *자연어 입력 (AI 분류 → Jira 이슈 생성):*
-              `@지라 로그인 페이지에서 500 에러 발생` → :bug: 버그로 등록
-              `@지라 다크모드 지원해주세요` → :pencil: 기능 요청으로 등록
+              `@봇더지라 로그인 페이지에서 500 에러 발생` → :bug: 버그로 등록
+              `@봇더지라 다크모드 지원해주세요` → :pencil: 기능 요청으로 등록
 
             이슈 등록 시 AI가 자동으로 분류(BUG/FEATURE/OTHER)하고 Story Point를 추정합니다.""";
 
@@ -168,7 +168,7 @@ public class SlackEventController {
         handleWithIntent(event, cleaned);
     }
 
-    // STUDY: 스레드 액션 — 부모 이슈가 있는 스레드에서 댓글로 @지라 호출 시.
+    // STUDY: 스레드 액션 — 부모 이슈가 있는 스레드에서 댓글로 @봇더지라 호출 시.
     //        키워드 우선 매칭 → Haiku 분류 fallback → 각 액션 실행.
     private void handleThreadAction(SlackEventInner event, String cleaned, IssueEntity parentIssue) {
         String lower = cleaned.toLowerCase();
@@ -291,7 +291,7 @@ public class SlackEventController {
                         intent.intent(), intent.confidence());
                 intentFailureRepository.save(new IntentFailureEntity(
                         cleaned, errorType, errorDetail, event.user(), event.channel()));
-                replyThread(event, ":thinking_face: 이해하지 못했어요. `@지라 help`로 사용 가능한 명령을 확인해주세요.");
+                replyThread(event, ":thinking_face: 이해하지 못했어요. `@봇더지라 help`로 사용 가능한 명령을 확인해주세요.");
                 return;
             }
 
@@ -300,16 +300,16 @@ public class SlackEventController {
                         issueCreateService.createFromSlackText(
                                 IssueCreateCommand.from(event, cleaned), intent);
                 case "search" ->
-                        replyThread(event, ":mag: 검색 기능은 준비 중입니다. `@지라 help`를 확인해주세요.");
+                        replyThread(event, ":mag: 검색 기능은 준비 중입니다. `@봇더지라 help`를 확인해주세요.");
                 case "statistics" ->
-                        replyThread(event, ":bar_chart: 통계 기능은 준비 중입니다. `@지라 help`를 확인해주세요.");
+                        replyThread(event, ":bar_chart: 통계 기능은 준비 중입니다. `@봇더지라 help`를 확인해주세요.");
                 case "my_tasks" ->
                         handleMyWork(event);
                 case "skip" ->
                         replyThread(event, ":no_entry_sign: 구체적인 내용을 포함해주세요.\n" +
-                                "예: `@지라 로그인 페이지에서 500 에러 발생`");
+                                "예: `@봇더지라 로그인 페이지에서 500 에러 발생`");
                 default ->
-                        replyThread(event, ":thinking_face: 이해하지 못했어요. `@지라 help`로 사용 가능한 명령을 확인해주세요.");
+                        replyThread(event, ":thinking_face: 이해하지 못했어요. `@봇더지라 help`로 사용 가능한 명령을 확인해주세요.");
             }
         });
     }
@@ -374,7 +374,7 @@ public class SlackEventController {
         if (event.thread_ts() == null) {
             if (event.channel() != null && event.ts() != null) {
                 slackNotifier.postThreadReply(event.channel(), event.ts(),
-                        "이슈 생성 스레드에서 댓글로 `@지라 완료`를 사용해주세요.");
+                        "이슈 생성 스레드에서 댓글로 `@봇더지라 완료`를 사용해주세요.");
             }
             return;
         }

@@ -83,7 +83,7 @@ apply_settings() {
     echo "   2. set -a && source .env && set +a && ./gradlew bootRun"
     echo ""
     echo -e "${YELLOW}⚠️  DB 동기화도 필요합니다:${NC}"
-    echo "   @지라봇 sync"
+    echo "   @봇더지라 sync"
 }
 
 interactive() {

@@ -44,7 +44,7 @@ public class IssueEntity {
 
     private Instant jiraUpdated;
 
-    // STUDY: 이 이슈가 생성된 Slack 스레드 정보. 스레드에서 "@지라 완료" 시 이슈를 매핑하는 데 사용.
+    // STUDY: 이 이슈가 생성된 Slack 스레드 정보. 스레드에서 "@봇더지라 완료" 시 이슈를 매핑하는 데 사용.
     private String slackChannel;
     private String slackThreadTs;
 
