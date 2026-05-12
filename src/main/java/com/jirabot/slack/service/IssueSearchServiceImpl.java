@@ -15,13 +15,15 @@ import org.springframework.stereotype.Service;
 //        Jira UI 의 Advanced Search 와 동일한 결과 범위를 갖는다.
 //        의미 검색(searchSemantic) 의 자연어 query 는 Jira 의 text ~ 풀텍스트 매칭에 그대로 위임.
 //        향후 자연어 → JQL 변환 단계가 필요해지면 이 클래스 안에서 Sonnet 호출을 추가하면 된다.
+//
+//        결과 노출 정책: 항상 최상위 5개만 가져와 번호 목록으로 표시한다. 총 개수는 노출하지 않는다.
+//        결과가 5개일 때만 더 있을 가능성을 알리는 "(이하 생략)" 라인을 덧붙인다.
 @Service
 public class IssueSearchServiceImpl implements IssueSearchService {
 
     private static final Logger log = LoggerFactory.getLogger(IssueSearchServiceImpl.class);
 
-    static final int MAX_SEARCH_RESULTS = 50;
-    private static final int SEARCH_MAX_DISPLAY = 10;
+    static final int MAX_SEARCH_RESULTS = 5;
 
     private final JiraApiClient jiraApiClient;
     private final String jiraBaseUrl;
@@ -33,8 +35,6 @@ public class IssueSearchServiceImpl implements IssueSearchService {
         this.jiraBaseUrl = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
     }
 
-    // STUDY: @Async 메서드는 Spring 프록시를 통해 호출되어야 비동기가 적용된다.
-    //        컨트롤러에서 외부 빈을 통해 호출하므로 적용된다.
     @Async("slackTaskExecutor")
     @Override
     public CompletableFuture<String> searchByKeyword(String keyword) {
@@ -66,22 +66,24 @@ public class IssueSearchServiceImpl implements IssueSearchService {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format(":mag: \"%s\" 검색 결과 (%d건)\n", keyword, hits.size()));
+        sb.append(":mag: 검색결과 최상위 ").append(MAX_SEARCH_RESULTS).append("개입니다:\n");
 
-        int displayCount = Math.min(hits.size(), SEARCH_MAX_DISPLAY);
+        int displayCount = Math.min(hits.size(), MAX_SEARCH_RESULTS);
         for (int i = 0; i < displayCount; i++) {
             JiraSearchHit hit = hits.get(i);
             String url = issueLink(hit.key());
             String assignee = (hit.assignee() == null || hit.assignee().isBlank())
                     ? "미배정" : hit.assignee();
-            sb.append(String.format("• <%s|%s> %s (%s, 담당: %s)\n",
-                    url, hit.key(), hit.summary(),
-                    hit.status() == null || hit.status().isBlank() ? "-" : hit.status(),
-                    assignee));
+            sb.append(i + 1).append(". <").append(url).append("|").append(hit.key()).append("> ")
+                    .append(hit.summary()).append(" (")
+                    .append(hit.status() == null || hit.status().isBlank() ? "-" : hit.status())
+                    .append(", 담당: ").append(assignee).append(")\n");
         }
 
-        if (hits.size() > SEARCH_MAX_DISPLAY) {
-            sb.append(String.format("외 %d건이 더 있습니다.", hits.size() - SEARCH_MAX_DISPLAY));
+        // STUDY: 5개를 가득 채워 받은 경우에만 더 있을 가능성이 있음을 표기.
+        //        그 이하라면 결과가 완전하다는 의미이므로 생략 라인을 붙이지 않는다.
+        if (hits.size() >= MAX_SEARCH_RESULTS) {
+            sb.append("(이하 생략)");
         }
 
         return sb.toString().stripTrailing();

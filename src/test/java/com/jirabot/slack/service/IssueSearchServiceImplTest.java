@@ -18,8 +18,8 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-// STUDY: 옵션 C 도입 후 IssueSearchServiceImpl 은 Jira REST 호출 위임만 담당.
-//        DB / Claude 의존이 사라졌으므로 테스트도 JiraApiClient mock 만으로 충분하다.
+// STUDY: 최상위 5개·번호 목록·총 개수 미노출 정책을 검증한다.
+//        결과가 정확히 5개일 때만 "(이하 생략)" 가 추가되어야 한다.
 class IssueSearchServiceImplTest {
 
     private JiraApiClient jiraApiClient;
@@ -43,18 +43,22 @@ class IssueSearchServiceImplTest {
     }
 
     @Test
-    void searchByKeyword_singleHit_formatsCorrectly() throws Exception {
+    void searchByKeyword_singleHit_numberedAndNoEllipsis() throws Exception {
         when(jiraApiClient.searchByText(eq("로그인"), anyInt())).thenReturn(List.of(
                 new JiraSearchHit("ES2-100", "로그인 페이지 500 에러", "진행 중", "임종승")));
 
         String result = service.searchByKeyword("로그인").get();
 
         assertThat(result)
-                .contains(":mag: \"로그인\" 검색 결과 (1건)")
-                .contains("<https://cryptolab.atlassian.net/browse/ES2-100|ES2-100>")
+                .contains(":mag: 검색결과 최상위 5개입니다:")
+                .contains("1. <https://cryptolab.atlassian.net/browse/ES2-100|ES2-100>")
                 .contains("로그인 페이지 500 에러")
                 .contains("진행 중")
-                .contains("담당: 임종승");
+                .contains("담당: 임종승")
+                .doesNotContain("(이하 생략)")
+                // 총 건수는 노출 안 함
+                .doesNotContain("(1건)")
+                .doesNotContain("(5건)");
     }
 
     @Test
@@ -68,20 +72,46 @@ class IssueSearchServiceImplTest {
     }
 
     @Test
-    void searchByKeyword_overflow_truncatesAtDisplayLimit() throws Exception {
-        List<JiraSearchHit> many = new ArrayList<>();
-        for (int i = 1; i <= 15; i++) {
-            many.add(new JiraSearchHit("ES2-" + i, "이슈 " + i, "진행 중", "담당자"));
+    void searchByKeyword_fiveHits_appendsEllipsisLine() throws Exception {
+        List<JiraSearchHit> five = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            five.add(new JiraSearchHit("ES2-" + i, "이슈 " + i, "진행 중", "담당자"));
         }
-        when(jiraApiClient.searchByText(eq("이슈"), anyInt())).thenReturn(many);
+        when(jiraApiClient.searchByText(eq("이슈"), anyInt())).thenReturn(five);
 
         String result = service.searchByKeyword("이슈").get();
 
         assertThat(result)
-                .contains(":mag: \"이슈\" 검색 결과 (15건)")
-                .contains("외 5건이 더 있습니다.");
-        // 처음 10개만 본문에 표시되어야 한다.
-        assertThat(result).contains("ES2-10").doesNotContain("ES2-11");
+                .contains(":mag: 검색결과 최상위 5개입니다:")
+                .contains("1. ").contains("2. ").contains("3. ").contains("4. ").contains("5. ")
+                .contains("(이하 생략)")
+                .doesNotContain("6. ");
+    }
+
+    @Test
+    void searchByKeyword_threeHits_noEllipsisLine() throws Exception {
+        List<JiraSearchHit> three = List.of(
+                new JiraSearchHit("ES2-1", "이슈 1", "진행 중", "담당자"),
+                new JiraSearchHit("ES2-2", "이슈 2", "진행 중", "담당자"),
+                new JiraSearchHit("ES2-3", "이슈 3", "진행 중", "담당자"));
+        when(jiraApiClient.searchByText(eq("이슈"), anyInt())).thenReturn(three);
+
+        String result = service.searchByKeyword("이슈").get();
+
+        assertThat(result)
+                .contains("1. ").contains("2. ").contains("3. ")
+                .doesNotContain("4. ")
+                .doesNotContain("(이하 생략)");
+    }
+
+    @Test
+    void searchByKeyword_requestsAtMostFiveFromJira() throws Exception {
+        when(jiraApiClient.searchByText(eq("k"), eq(IssueSearchServiceImpl.MAX_SEARCH_RESULTS)))
+                .thenReturn(List.of());
+
+        service.searchByKeyword("k").get();
+
+        verify(jiraApiClient).searchByText(eq("k"), eq(5));
     }
 
     @Test
@@ -92,7 +122,6 @@ class IssueSearchServiceImplTest {
         String result = service.searchSemantic("결제 관련 이슈 보여줘", "결제").get();
 
         assertThat(result).contains("ES2-300").contains("결제 금액 표시 오류");
-        // 1차 query 로 매칭이 됐으므로 fallback 키워드 재호출은 발생하지 않아야 한다.
         verify(jiraApiClient, times(1)).searchByText(eq("결제 관련 이슈 보여줘"), anyInt());
         verifyNoMoreInteractions(jiraApiClient);
     }
