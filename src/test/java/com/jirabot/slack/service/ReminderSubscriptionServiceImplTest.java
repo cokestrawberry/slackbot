@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,15 +49,32 @@ class ReminderSubscriptionServiceImplTest {
     }
 
     @Test
-    void enable_alreadyOn_isIdempotent() {
+    void enable_alreadyOn_isIdempotent_noExtraSave() {
         UserMappingEntity mapping = new UserMappingEntity("U1", "alice", "Alice");
         mapping.setReminderEnabled(true);
         when(repository.findBySlackUserId("U1")).thenReturn(Optional.of(mapping));
 
-        service.enable("U1");
+        // 두 번 호출해도 추가 save 가 일어나지 않아야 한다.
+        String first = service.enable("U1");
+        String second = service.enable("U1");
 
         assertThat(mapping.isReminderEnabled()).isTrue();
-        verify(repository, times(1)).save(mapping);
+        assertThat(first).contains("이미 켜져");
+        assertThat(second).contains("이미 켜져");
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void disable_alreadyOff_isIdempotent_noExtraSave() {
+        UserMappingEntity mapping = new UserMappingEntity("U1", "alice", "Alice");
+        // 기본 reminderEnabled=false
+        when(repository.findBySlackUserId("U1")).thenReturn(Optional.of(mapping));
+
+        service.disable("U1");
+        service.disable("U1");
+
+        assertThat(mapping.isReminderEnabled()).isFalse();
+        verify(repository, never()).save(any());
     }
 
     @Test

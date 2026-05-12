@@ -9,5 +9,9 @@ public interface UserMappingRepository extends JpaRepository<UserMappingEntity, 
 
     Optional<UserMappingEntity> findBySlackUserId(String slackUserId);
 
+    Optional<UserMappingEntity> findByJiraAccountId(String jiraAccountId);
+
+    Optional<UserMappingEntity> findByJiraDisplayName(String jiraDisplayName);
+
     List<UserMappingEntity> findByReminderEnabledTrue();
 }

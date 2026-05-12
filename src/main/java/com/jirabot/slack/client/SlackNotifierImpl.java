@@ -125,8 +125,33 @@ public class SlackNotifierImpl implements SlackNotifier {
 
     @Override
     public void sendDirectMessage(String userId, String text) {
-        // STUDY: chat.postMessage 의 channel 필드에 user ID 를 넘기면 Slack 이 IM 채널을 자동 개통한다.
-        //        별도 conversations.open 호출 없이 동작 (스코프: chat:write + im:write).
-        postMessage(userId, text);
+        if (userId == null || userId.isBlank()) {
+            log.warn("Slack DM skipped: userId is blank");
+            return;
+        }
+        try {
+            // STUDY: conversations.open 으로 user ID → IM 채널 ID 를 받는다. user ID 를 chat.postMessage 의 channel
+            //        파라미터에 직접 넘기는 동작이 일부 워크스페이스/스코프 조합에서 channel_not_found 로 실패하는
+            //        사례가 보고되어, 명시적으로 IM 채널을 여는 방식이 더 견고하다.
+            String openResp = slackWebClient.post()
+                    .uri("/conversations.open")
+                    .bodyValue(Map.of("users", userId))
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .block();
+            var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(openResp);
+            if (!node.path("ok").asBoolean(false)) {
+                log.warn("conversations.open failed for userId={}: {}", userId, node.path("error").asText());
+                return;
+            }
+            String channelId = node.path("channel").path("id").asText(null);
+            if (channelId == null || channelId.isBlank()) {
+                log.warn("conversations.open returned no channel id for userId={}", userId);
+                return;
+            }
+            postMessage(channelId, text);
+        } catch (Exception e) {
+            log.warn("Slack DM failed for userId={}: {}", userId, e.toString());
+        }
     }
 }

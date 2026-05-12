@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 // STUDY: 사용자별 리마인더 opt-in 토글. UserMappingEntity.reminderEnabled 한 컬럼으로 관리하고
 //        매핑이 없는 사용자는 먼저 `@봇더지라 등록` 으로 매핑을 만들도록 안내한다.
+//        enable/disable 은 상태 변경이 실제로 일어날 때만 DB save 를 호출한다 (반복 호출 시 불필요한 쓰기 회피).
 @Service
 public class ReminderSubscriptionServiceImpl implements ReminderSubscriptionService {
 
@@ -31,6 +32,10 @@ public class ReminderSubscriptionServiceImpl implements ReminderSubscriptionServ
             return ":warning: 먼저 `@봇더지라 등록 <Jira 사용자명>` 으로 본인 매핑을 등록해주세요.";
         }
         UserMappingEntity m = mapping.get();
+        if (m.isReminderEnabled()) {
+            // 멱등 — 이미 ON 이면 DB write 없이 동일 메시지를 회신.
+            return ":bell: 리마인더가 이미 켜져 있습니다.";
+        }
         m.setReminderEnabled(true);
         userMappingRepository.save(m);
         log.info("Reminder enabled slackUserId={}", slackUserId);
@@ -45,6 +50,10 @@ public class ReminderSubscriptionServiceImpl implements ReminderSubscriptionServ
             return ":no_bell: 리마인더가 꺼져 있습니다.";
         }
         UserMappingEntity m = mapping.get();
+        if (!m.isReminderEnabled()) {
+            // 이미 OFF 면 DB write 회피.
+            return ":no_bell: 리마인더가 꺼져 있습니다.";
+        }
         m.setReminderEnabled(false);
         userMappingRepository.save(m);
         log.info("Reminder disabled slackUserId={}", slackUserId);

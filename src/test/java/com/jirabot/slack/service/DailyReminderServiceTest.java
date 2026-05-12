@@ -2,6 +2,7 @@ package com.jirabot.slack.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -82,7 +83,7 @@ class DailyReminderServiceTest {
         rebuild(true);
         when(userMappingRepository.findByReminderEnabledTrue())
                 .thenReturn(List.of(subscriber("U1", "Alice")));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("Alice", "완료"))
+        when(issueRepository.findByAssigneeInAndStatusCategoryNot(anyCollection(), eq("완료")))
                 .thenReturn(List.of());
 
         service.run();
@@ -95,7 +96,7 @@ class DailyReminderServiceTest {
         rebuild(true);
         when(userMappingRepository.findByReminderEnabledTrue())
                 .thenReturn(List.of(subscriber("U1", "Alice")));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("Alice", "완료"))
+        when(issueRepository.findByAssigneeInAndStatusCategoryNot(anyCollection(), eq("완료")))
                 .thenReturn(List.of(issue("ES2-100", "로그인 에러", "Alice")));
 
         service.run();
@@ -112,10 +113,11 @@ class DailyReminderServiceTest {
         UserMappingEntity u1 = subscriber("U1", "Alice");
         UserMappingEntity u2 = subscriber("U2", "Bob");
         when(userMappingRepository.findByReminderEnabledTrue()).thenReturn(List.of(u1, u2));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("Alice", "완료"))
-                .thenReturn(List.of(issue("ES2-1", "이슈 A", "Alice")));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("Bob", "완료"))
-                .thenReturn(List.of(issue("ES2-2", "이슈 B", "Bob")));
+        // STUDY: 단일 IN 쿼리로 모두 가져온 뒤 메모리에서 assignee 별로 그룹핑되므로 mock 도 한 번만 stub.
+        when(issueRepository.findByAssigneeInAndStatusCategoryNot(anyCollection(), eq("완료")))
+                .thenReturn(List.of(
+                        issue("ES2-1", "이슈 A", "Alice"),
+                        issue("ES2-2", "이슈 B", "Bob")));
         doThrow(new RuntimeException("slack down"))
                 .when(slackNotifier).sendDirectMessage(eq("U1"), anyString());
 
@@ -124,6 +126,22 @@ class DailyReminderServiceTest {
         // 첫 사용자 실패 후에도 두 번째 사용자 발송은 시도된다.
         verify(slackNotifier, times(1)).sendDirectMessage(eq("U1"), anyString());
         verify(slackNotifier, times(1)).sendDirectMessage(eq("U2"), anyString());
+    }
+
+    @Test
+    void singleQueryForAllSubscribers_avoidsN_plus_1() {
+        rebuild(true);
+        UserMappingEntity u1 = subscriber("U1", "Alice");
+        UserMappingEntity u2 = subscriber("U2", "Bob");
+        UserMappingEntity u3 = subscriber("U3", "Carol");
+        when(userMappingRepository.findByReminderEnabledTrue()).thenReturn(List.of(u1, u2, u3));
+        when(issueRepository.findByAssigneeInAndStatusCategoryNot(anyCollection(), eq("완료")))
+                .thenReturn(List.of());
+
+        service.run();
+
+        // 구독자 3명이지만 DB 호출은 IN 쿼리 1회만.
+        verify(issueRepository, times(1)).findByAssigneeInAndStatusCategoryNot(anyCollection(), eq("완료"));
     }
 
     @Test

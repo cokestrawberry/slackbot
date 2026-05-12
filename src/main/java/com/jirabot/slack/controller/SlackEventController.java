@@ -163,6 +163,10 @@ public class SlackEventController {
             handleRegisterUser(event, jiraUsername);
             return;
         }
+        if (lower.equals("리마인더") || lower.equals("reminder")) {
+            replyThread(event, ":warning: 사용법: `@봇더지라 리마인더 on` / `off` / `상태`");
+            return;
+        }
         if (lower.startsWith("리마인더 ") || lower.startsWith("reminder ")) {
             String arg = cleaned.substring(cleaned.indexOf(' ') + 1).strip().toLowerCase();
             handleReminder(event, arg);
