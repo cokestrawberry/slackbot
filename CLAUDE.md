@@ -22,22 +22,18 @@
 - Challenge your own work before presenting it
 
 ## Core Principles
-- **Simplicity First**: Make every change as simple as possible. Impact minimal code
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards
-- **Study**: When writing Spring Boot code, add inline comments starting with "// STUDY:" to explain concepts the developer should study further (e.g., unfamiliar annotations, patterns, or framework internals).
+- **Study**: When writing Spring Boot code, add inline comments starting with "// STUDY:" to explain concepts the developer should study further (e.g., unfamiliar annotations, patterns, or framework internals). This is a deliberate exception to the user-level "minimize comments in production code" rule, scoped to learning-oriented edits in this project.
 
 
 ## Project General Instructions
 
 - Always use the latest versions of dependencies.
-- Always write Java code as the Spring Boot application.
-- Always use Maven for dependency management.
-- Always create test cases for the generated code both positive and negative.
-- Always generate the CircleCI pipeline in the .circleci directory to verify the code.
-- Minimize the amount of code generated.
-- The Maven artifact name must be the same as the parent directory name.
-- Use semantic versioning for the Maven project. Each time you generate a new version, bump the PATCH section of the version number.
-- Use `pl.piomin.services` as the group ID for the Maven project and base Java package.
+- The main service (`src/`) is a Java 17 Spring Boot application; the bot component (`bot/`) is written in Go.
+- Always use Gradle for dependency management (`build.gradle`, `gradlew`).
+- Always create test cases for the generated code, both positive and negative.
+- Use `com.jirabot` as the group ID and base Java package.
 - Do not use the Lombok library.
+- Use semantic versioning for the project. Each time you generate a new version, bump the PATCH section of the version number.
 - Generate the Docker Compose file to run all components used by the application.
 - Update README.md each time you generate a new version.
