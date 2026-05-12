@@ -18,6 +18,7 @@ import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.IssueCreateService;
 import com.jirabot.slack.service.IssueSearchService;
 import com.jirabot.slack.service.JiraSyncService;
+import com.jirabot.slack.service.ReminderSubscriptionService;
 import com.jirabot.slack.service.ScrumReportService;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,7 @@ public class SlackEventController {
               `@봇더지라 작업 Alice` — 특정 팀원의 작업 조회
               `@봇더지라 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
               `@봇더지라 검색 <키워드>` — 이슈 제목/설명으로 검색 (예: `@봇더지라 검색 preset`)
+              `@봇더지라 리마인더 on` / `off` / `상태` — 평일 09:00 미해결 이슈 DM 알림 토글
               `@봇더지라 sync` — Jira 이슈를 로컬 DB에 동기화
               `@봇더지라 완료` — 이슈 스레드에서 → Jira 완료 처리
 
@@ -82,6 +84,7 @@ public class SlackEventController {
     private final SlackNotifier slackNotifier;
     private final Executor slackExecutor;
     private final SlackEventDeduplicator deduplicator;
+    private final ReminderSubscriptionService reminderSubscriptionService;
     private final Set<String> allowedChannels;
 
     public SlackEventController(IssueCreateService issueCreateService,
@@ -97,6 +100,7 @@ public class SlackEventController {
                                 SlackNotifier slackNotifier,
                                 @Qualifier(AsyncConfig.SLACK_EXECUTOR) Executor slackExecutor,
                                 SlackEventDeduplicator deduplicator,
+                                ReminderSubscriptionService reminderSubscriptionService,
                                 @Value("${slack.allowed-channels:}") String allowedChannelsConfig) {
         this.issueCreateService = issueCreateService;
         this.issueSearchService = issueSearchService;
@@ -111,6 +115,7 @@ public class SlackEventController {
         this.slackNotifier = slackNotifier;
         this.slackExecutor = slackExecutor;
         this.deduplicator = deduplicator;
+        this.reminderSubscriptionService = reminderSubscriptionService;
         // STUDY: 허용 채널이 비어있으면 모든 채널 허용. 쉼표 구분으로 파싱.
         if (allowedChannelsConfig == null || allowedChannelsConfig.isBlank()) {
             this.allowedChannels = Set.of();
@@ -156,6 +161,15 @@ public class SlackEventController {
         if (lower.startsWith("등록 ") || lower.startsWith("register ")) {
             String jiraUsername = cleaned.substring(cleaned.indexOf(' ') + 1).strip();
             handleRegisterUser(event, jiraUsername);
+            return;
+        }
+        if (lower.equals("리마인더") || lower.equals("reminder")) {
+            replyThread(event, ":warning: 사용법: `@봇더지라 리마인더 on` / `off` / `상태`");
+            return;
+        }
+        if (lower.startsWith("리마인더 ") || lower.startsWith("reminder ")) {
+            String arg = cleaned.substring(cleaned.indexOf(' ') + 1).strip().toLowerCase();
+            handleReminder(event, arg);
             return;
         }
         if (lower.equals("검색") || lower.equals("search")) {
@@ -476,6 +490,24 @@ public class SlackEventController {
                     ":white_check_mark: 등록 완료!\nSlack: *%s*\nJira: *%s*\n\n앞으로 이슈 생성 시 보고자/담당자가 자동으로 설정됩니다.",
                     slackName, jiraUsername));
         }).start();
+    }
+
+    // STUDY: 리마인더 명령 — 호출자의 opt-in 상태를 토글한다.
+    //        on / off / 상태(status) 세 가지 인자를 받는다. 그 외는 안내 메시지.
+    private void handleReminder(SlackEventInner event, String arg) {
+        log.info("Reminder command requested arg='{}' user={}", arg, event.user());
+        String userId = event.user();
+        if (userId == null || userId.isBlank()) {
+            replyThread(event, ":warning: 호출자 정보를 식별할 수 없습니다.");
+            return;
+        }
+        String result = switch (arg) {
+            case "on" -> reminderSubscriptionService.enable(userId);
+            case "off" -> reminderSubscriptionService.disable(userId);
+            case "상태", "status" -> reminderSubscriptionService.status(userId);
+            default -> ":warning: 사용법: `@봇더지라 리마인더 on` / `off` / `상태`";
+        };
+        replyThread(event, result);
     }
 
     private void handleMemberWork(SlackEventInner event, String memberName) {

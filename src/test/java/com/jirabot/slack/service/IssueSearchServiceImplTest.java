@@ -45,7 +45,7 @@ class IssueSearchServiceImplTest {
     @Test
     void searchByKeyword_singleHit_numberedAndNoEllipsis() throws Exception {
         when(jiraApiClient.searchByText(eq("로그인"), anyInt())).thenReturn(List.of(
-                new JiraSearchHit("ES2-100", "로그인 페이지 500 에러", "진행 중", "임종승")));
+                new JiraSearchHit("ES2-100", "로그인 페이지 500 에러", "진행 중", "Alice")));
 
         String result = service.searchByKeyword("로그인").get();
 
@@ -54,7 +54,7 @@ class IssueSearchServiceImplTest {
                 .contains("1. <https://cryptolab.atlassian.net/browse/ES2-100|ES2-100>")
                 .contains("로그인 페이지 500 에러")
                 .contains("진행 중")
-                .contains("담당: 임종승")
+                .contains("담당: Alice")
                 .doesNotContain("(이하 생략)")
                 // 총 건수는 노출 안 함
                 .doesNotContain("(1건)")
