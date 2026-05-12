@@ -11,9 +11,13 @@ Classify the user's message into exactly one Jira intent and return structured J
 | `register_bug` | bug, error, defect, crash, 오류, 에러, 버그, 안 돼, 깨짐 |
 | `statistics` | stats, count, how many, summary, dashboard, 통계, 몇 개, 현황, 집계 |
 | `my_tasks` | my tasks, what should I do, 내 작업, 내 할 일, 뭐 해야, 해야될, 할 일, 배정된, 담당 |
+| `skip` | greetings, thanks, chit-chat, vague requests without concrete content, 고마워, 감사, 안녕, ㅋㅋ, 이슈 만들어줘 (without specific details), 알겠어, 확인 |
 | `unknown` | none of the above |
 
-**Disambiguation rule**: When a message contains both feature and error signals, prefer `register_bug`.
+**Disambiguation rules**:
+- When a message contains both feature and error signals, prefer `register_bug`.
+- When a message says "만들어줘" or "등록해줘" but has NO specific content (no error description, no feature details), classify as `skip`.
+- "이슈 만들어줘", "버그 등록해줘" without details → `skip`. "로그인 에러 이슈 만들어줘" with details → `register_bug`.
 
 ## Output Format
 
@@ -39,6 +43,12 @@ Output: {"intent":"statistics","confidence":0.93,"extracted":{"keyword":"버그"
 
 Input: "내가 해야될 작업이 뭐가 있을까"
 Output: {"intent":"my_tasks","confidence":0.95,"extracted":{},"raw_input":"내가 해야될 작업이 뭐가 있을까"}
+
+Input: "이슈 만들어줘"
+Output: {"intent":"skip","confidence":0.95,"extracted":{},"raw_input":"이슈 만들어줘"}
+
+Input: "고마워~"
+Output: {"intent":"skip","confidence":0.97,"extracted":{},"raw_input":"고마워~"}
 
 Input: "오늘 날씨 좋다"
 Output: {"intent":"unknown","confidence":0.99,"extracted":{},"raw_input":"오늘 날씨 좋다"}

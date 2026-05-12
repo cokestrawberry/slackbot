@@ -9,7 +9,13 @@ import java.util.Optional;
 
 public interface JiraApiClient {
 
-    JiraCreateResponse createIssue(IssueClassification classification, String reporterSlackUserId);
+    JiraCreateResponse createIssue(IssueClassification classification, String reporterName,
+                                   String jiraAccountId);
+
+    /**
+     * Jira displayName으로 유저를 검색하여 accountId를 반환한다.
+     */
+    String findAccountId(String displayName);
 
     Optional<SprintInfo> getActiveSprint();
 

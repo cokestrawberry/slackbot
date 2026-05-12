@@ -43,7 +43,7 @@ class JiraApiClientImplTest {
                 .setBody("{\"id\":\"10001\",\"key\":\"PROJ-1\",\"self\":\"https://j/r/PROJ-1\"}"));
 
         JiraCreateResponse resp = client.createIssue(
-                new IssueClassification(IssueClassification.IssueType.BUG, 2, "t", "s"), "U1");
+                new IssueClassification(IssueClassification.IssueType.BUG, 2, "t", "s"), "U1", null);
 
         assertThat(resp.key()).isEqualTo("PROJ-1");
     }
@@ -53,7 +53,7 @@ class JiraApiClientImplTest {
         server.enqueue(new MockResponse().setResponseCode(400).setBody("bad"));
 
         assertThatThrownBy(() -> client.createIssue(
-                new IssueClassification(IssueClassification.IssueType.FEATURE, 3, "t", "s"), "U"))
+                new IssueClassification(IssueClassification.IssueType.FEATURE, 3, "t", "s"), "U", null))
                 .isInstanceOf(JiraApiException.class);
     }
 
@@ -62,7 +62,7 @@ class JiraApiClientImplTest {
         server.enqueue(new MockResponse().setResponseCode(500).setBody("boom"));
 
         assertThatThrownBy(() -> client.createIssue(
-                new IssueClassification(IssueClassification.IssueType.OTHER, 1, "t", "s"), "U"))
+                new IssueClassification(IssueClassification.IssueType.OTHER, 1, "t", "s"), "U", null))
                 .isInstanceOf(JiraTransientException.class);
     }
 }

@@ -17,6 +17,7 @@ import com.jirabot.slack.client.ThreadActionClassifier;
 import com.jirabot.slack.client.dto.IntentResult;
 import com.jirabot.slack.repository.IntentFailureRepository;
 import com.jirabot.slack.repository.IssueRepository;
+import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.IssueCreateResult;
 import com.jirabot.slack.service.IssueCreateService;
 import com.jirabot.slack.service.JiraSyncService;
@@ -39,6 +40,7 @@ class SlackEventControllerTest {
     private IntentClassifier intentClassifier;
     private ThreadActionClassifier threadActionClassifier;
     private IntentFailureRepository intentFailureRepository;
+    private UserMappingRepository userMappingRepository;
     private SlackNotifier slackNotifier;
     private MockMvc mockMvc;
 
@@ -52,11 +54,13 @@ class SlackEventControllerTest {
         intentClassifier = mock(IntentClassifier.class);
         threadActionClassifier = mock(ThreadActionClassifier.class);
         intentFailureRepository = mock(IntentFailureRepository.class);
+        userMappingRepository = mock(UserMappingRepository.class);
         slackNotifier = mock(SlackNotifier.class);
         mockMvc = standaloneSetup(new SlackEventController(
                 issueCreateService, scrumReportService, jiraSyncService,
                 jiraApiClient, issueRepository, intentClassifier,
-                threadActionClassifier, intentFailureRepository, slackNotifier,
+                threadActionClassifier, intentFailureRepository,
+                userMappingRepository, slackNotifier,
                 "C1,C2")).build();
     }
 

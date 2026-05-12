@@ -13,6 +13,7 @@ import com.jirabot.slack.entity.IssueEntity;
 import com.jirabot.slack.entity.IntentFailureEntity;
 import com.jirabot.slack.repository.IntentFailureRepository;
 import com.jirabot.slack.repository.IssueRepository;
+import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.IssueCreateService;
 import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ScrumReportService;
@@ -47,6 +48,7 @@ public class SlackEventController {
               `@지라봇 scrum` — 스프린트 일일 리포트
               `@지라봇 내작업` — 내 진행 중인 작업 조회
               `@지라봇 작업 김영현` — 특정 팀원의 작업 조회
+              `@지라봇 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
               `@지라봇 sync` — Jira 이슈를 로컬 DB에 동기화
               `@지라봇 완료` — 이슈 스레드에서 → Jira 완료 처리
 
@@ -70,6 +72,7 @@ public class SlackEventController {
     private final IntentClassifier intentClassifier;
     private final ThreadActionClassifier threadActionClassifier;
     private final IntentFailureRepository intentFailureRepository;
+    private final UserMappingRepository userMappingRepository;
     private final SlackNotifier slackNotifier;
     private final Set<String> allowedChannels;
 
@@ -81,6 +84,7 @@ public class SlackEventController {
                                 IntentClassifier intentClassifier,
                                 ThreadActionClassifier threadActionClassifier,
                                 IntentFailureRepository intentFailureRepository,
+                                UserMappingRepository userMappingRepository,
                                 SlackNotifier slackNotifier,
                                 @Value("${slack.allowed-channels:}") String allowedChannelsConfig) {
         this.issueCreateService = issueCreateService;
@@ -91,6 +95,7 @@ public class SlackEventController {
         this.intentClassifier = intentClassifier;
         this.threadActionClassifier = threadActionClassifier;
         this.intentFailureRepository = intentFailureRepository;
+        this.userMappingRepository = userMappingRepository;
         this.slackNotifier = slackNotifier;
         // STUDY: 허용 채널이 비어있으면 모든 채널 허용. 쉼표 구분으로 파싱.
         if (allowedChannelsConfig == null || allowedChannelsConfig.isBlank()) {
@@ -132,6 +137,11 @@ public class SlackEventController {
         }
         if (lower.startsWith("작업 ") && cleaned.length() > 3) {
             handleMemberWork(event, cleaned.substring(3).strip());
+            return;
+        }
+        if (lower.startsWith("등록 ") || lower.startsWith("register ")) {
+            String jiraUsername = cleaned.substring(cleaned.indexOf(' ') + 1).strip();
+            handleRegisterUser(event, jiraUsername);
             return;
         }
 
@@ -286,6 +296,9 @@ public class SlackEventController {
                         replyThread(event, ":bar_chart: 통계 기능은 준비 중입니다. `@지라봇 help`를 확인해주세요.");
                 case "my_tasks" ->
                         handleMyWork(event);
+                case "skip" ->
+                        replyThread(event, ":no_entry_sign: 구체적인 내용을 포함해주세요.\n" +
+                                "예: `@지라봇 로그인 페이지에서 500 에러 발생`");
                 default ->
                         replyThread(event, ":thinking_face: 이해하지 못했어요. `@지라봇 help`로 사용 가능한 명령을 확인해주세요.");
             }
@@ -375,6 +388,41 @@ public class SlackEventController {
                         String.format("*%s* 완료 처리에 실패했습니다. Jira에서 직접 확인해주세요.",
                                 issue.getIssueKey()));
             }
+        }).start();
+    }
+
+    private void handleRegisterUser(SlackEventInner event, String jiraUsername) {
+        log.info("User registration requested: slackUser={} jiraUsername={}", event.user(), jiraUsername);
+        new Thread(() -> {
+            // 1. Jira에서 유저 검색
+            String accountId = jiraApiClient.findAccountId(jiraUsername);
+            if (accountId == null) {
+                replyThread(event, String.format(
+                        ":x: Jira에서 *%s* 사용자를 찾을 수 없습니다.\nJira에 등록된 이름으로 다시 시도해주세요.",
+                        jiraUsername));
+                return;
+            }
+
+            // 2. Slack 실명 조회
+            String slackName = slackNotifier.getUserRealName(event.user());
+            if (slackName == null) slackName = event.user();
+
+            // 3. DB 매핑 저장 (있으면 업데이트, 없으면 생성)
+            var existing = userMappingRepository.findBySlackUserId(event.user());
+            if (existing.isPresent()) {
+                var entity = existing.get();
+                entity.setJiraDisplayName(jiraUsername);
+                entity.setJiraAccountId(accountId);
+                entity.setSlackDisplayName(slackName);
+                userMappingRepository.save(entity);
+            } else {
+                userMappingRepository.save(new com.jirabot.slack.entity.UserMappingEntity(
+                        event.user(), slackName, jiraUsername, accountId));
+            }
+
+            replyThread(event, String.format(
+                    ":white_check_mark: 등록 완료!\nSlack: *%s*\nJira: *%s*\n\n앞으로 이슈 생성 시 보고자/담당자가 자동으로 설정됩니다.",
+                    slackName, jiraUsername));
         }).start();
     }
 
