@@ -53,6 +53,7 @@ class SlackEventControllerTest {
     private IntentFailureRepository intentFailureRepository;
     private UserMappingRepository userMappingRepository;
     private SlackNotifier slackNotifier;
+    private com.jirabot.slack.service.ReminderSubscriptionService reminderSubscriptionService;
     private SlackEventController controller;
     private MockMvc mockMvc;
 
@@ -71,6 +72,7 @@ class SlackEventControllerTest {
         intentFailureRepository = mock(IntentFailureRepository.class);
         userMappingRepository = mock(UserMappingRepository.class);
         slackNotifier = mock(SlackNotifier.class);
+        reminderSubscriptionService = mock(com.jirabot.slack.service.ReminderSubscriptionService.class);
         Executor directExecutor = Runnable::run;
         SlackEventDeduplicator deduplicator = new SlackEventDeduplicator();
         controller = new SlackEventController(
@@ -78,8 +80,73 @@ class SlackEventControllerTest {
                 jiraSyncService, jiraApiClient, jiraProps, issueRepository, intentClassifier,
                 threadActionClassifier, intentFailureRepository,
                 userMappingRepository, slackNotifier,
-                directExecutor, deduplicator, "C1,C2");
+                directExecutor, deduplicator, reminderSubscriptionService, "C1,C2");
         mockMvc = standaloneSetup(controller).build();
+    }
+
+    @Test
+    void reminderOnCommand_callsEnable() throws Exception {
+        when(reminderSubscriptionService.enable("U1")).thenReturn(":bell: 리마인더가 켜졌습니다.");
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 리마인더 on","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(reminderSubscriptionService).enable("U1");
+    }
+
+    @Test
+    void reminderOffCommand_callsDisable() throws Exception {
+        when(reminderSubscriptionService.disable("U1")).thenReturn(":no_bell: 리마인더가 꺼졌습니다.");
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> reminder off","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(reminderSubscriptionService).disable("U1");
+    }
+
+    @Test
+    void reminderStatusCommand_callsStatus() throws Exception {
+        when(reminderSubscriptionService.status("U1")).thenReturn(":no_bell: 리마인더 OFF.");
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 리마인더 상태","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(reminderSubscriptionService).status("U1");
+    }
+
+    @Test
+    void reminderZeroArg_returnsUsageWithoutCallingService() throws Exception {
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 리마인더","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(reminderSubscriptionService, never()).enable(any());
+        verify(reminderSubscriptionService, never()).disable(any());
+        verify(reminderSubscriptionService, never()).status(any());
     }
 
     @Test
