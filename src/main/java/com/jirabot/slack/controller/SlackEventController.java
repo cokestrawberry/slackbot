@@ -16,6 +16,7 @@ import com.jirabot.slack.repository.IntentFailureRepository;
 import com.jirabot.slack.repository.IssueRepository;
 import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.IssueCreateService;
+import com.jirabot.slack.service.IssueSearchService;
 import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ScrumReportService;
 import java.util.List;
@@ -52,6 +53,7 @@ public class SlackEventController {
               `@지라 내작업` — 내 진행 중인 작업 조회
               `@지라 작업 김영현` — 특정 팀원의 작업 조회
               `@지라 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
+              `@지라 검색 <키워드>` — 이슈 제목/설명으로 검색 (예: `@지라 검색 preset`)
               `@지라 sync` — Jira 이슈를 로컬 DB에 동기화
               `@지라 완료` — 이슈 스레드에서 → Jira 완료 처리
 
@@ -68,6 +70,7 @@ public class SlackEventController {
             이슈 등록 시 AI가 자동으로 분류(BUG/FEATURE/OTHER)하고 Story Point를 추정합니다.""";
 
     private final IssueCreateService issueCreateService;
+    private final IssueSearchService issueSearchService;
     private final ScrumReportService scrumReportService;
     private final JiraSyncService jiraSyncService;
     private final JiraApiClient jiraApiClient;
@@ -82,6 +85,7 @@ public class SlackEventController {
     private final Set<String> allowedChannels;
 
     public SlackEventController(IssueCreateService issueCreateService,
+                                IssueSearchService issueSearchService,
                                 ScrumReportService scrumReportService,
                                 JiraSyncService jiraSyncService,
                                 JiraApiClient jiraApiClient,
@@ -95,6 +99,7 @@ public class SlackEventController {
                                 SlackEventDeduplicator deduplicator,
                                 @Value("${slack.allowed-channels:}") String allowedChannelsConfig) {
         this.issueCreateService = issueCreateService;
+        this.issueSearchService = issueSearchService;
         this.scrumReportService = scrumReportService;
         this.jiraSyncService = jiraSyncService;
         this.jiraApiClient = jiraApiClient;
@@ -151,6 +156,21 @@ public class SlackEventController {
         if (lower.startsWith("등록 ") || lower.startsWith("register ")) {
             String jiraUsername = cleaned.substring(cleaned.indexOf(' ') + 1).strip();
             handleRegisterUser(event, jiraUsername);
+            return;
+        }
+        if (lower.equals("검색") || lower.equals("search")) {
+            replyThread(event, ":mag: 검색어를 입력해주세요. 예: `@지라 검색 로그인`");
+            return;
+        }
+        if (lower.startsWith("검색 ") || lower.startsWith("search ")) {
+            String keyword = cleaned.substring(cleaned.indexOf(' ') + 1).strip();
+            issueSearchService.searchByKeyword(keyword)
+                    .thenAccept(result -> replyThread(event, result))
+                    .exceptionally(ex -> {
+                        log.warn("Keyword search failed for keyword='{}': {}", keyword, ex.toString());
+                        replyThread(event, ":x: 검색 중 오류가 발생했어요.");
+                        return null;
+                    });
             return;
         }
 
@@ -299,8 +319,19 @@ public class SlackEventController {
                 case "register_bug", "register_story" ->
                         issueCreateService.createFromSlackText(
                                 IssueCreateCommand.from(event, cleaned), intent);
-                case "search" ->
-                        replyThread(event, ":mag: 검색 기능은 준비 중입니다. `@지라 help`를 확인해주세요.");
+                case "search" -> {
+                    // STUDY: Haiku가 검색 의도로 분류한 경우, Sonnet 기반 의미 검색을 수행한다.
+                    //        서비스 레이어에서 비동기 처리되므로 executor 중첩 없음.
+                    String fallbackKeyword = intent.extracted() != null
+                            ? intent.extracted().getOrDefault("keyword", cleaned) : cleaned;
+                    issueSearchService.searchSemantic(cleaned, fallbackKeyword)
+                            .thenAccept(result -> replyThread(event, result))
+                            .exceptionally(ex -> {
+                                log.warn("Semantic search failed: {}", ex.toString());
+                                replyThread(event, ":x: 검색 중 오류가 발생했어요.");
+                                return null;
+                            });
+                }
                 case "statistics" ->
                         replyThread(event, ":bar_chart: 통계 기능은 준비 중입니다. `@지라 help`를 확인해주세요.");
                 case "my_tasks" ->
