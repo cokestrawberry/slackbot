@@ -10,6 +10,7 @@ import com.jirabot.slack.config.JiraProperties;
 import com.jirabot.slack.dto.IssueCreateCommand;
 import com.jirabot.slack.entity.IssueEntity;
 import com.jirabot.slack.repository.IssueRepository;
+import com.jirabot.slack.util.BlockKitBuilder;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -110,23 +111,16 @@ public class IssueCreateServiceImpl implements IssueCreateService {
         if (command.channel() == null || command.eventTs() == null) {
             return;
         }
-        StringBuilder message = new StringBuilder();
-        message.append(String.format(
-                ":white_check_mark: Jira 이슈가 등록되었습니다!\n*[%s] %s*\n분류: %s | Story Point: %d\n%s",
+        // STUDY: Block Kit JSON으로 리치 메시지 + 액션 버튼을 전송한다.
+        //        text 필드는 Block Kit 미지원 클라이언트용 fallback.
+        String fallbackText = String.format(
+                ":white_check_mark: Jira 이슈가 등록되었습니다! [%s] %s 분류: %s | SP: %d %s",
                 key, classification.title(), classification.type(),
-                classification.storyPoint(), url));
+                classification.storyPoint(), url);
 
-        if (!similar.isEmpty()) {
-            message.append("\n\n:warning: *유사한 이슈가 존재합니다:*\n");
-            for (IssueEntity s : similar) {
-                String issueUrl = buildIssueUrl(s.getIssueKey());
-                message.append(String.format("  • <%s|%s> %s (%s)\n",
-                        issueUrl, s.getIssueKey(), s.getSummary(), s.getStatus()));
-            }
-            message.append("중복이라면 새 이슈를 닫아주세요.");
-        }
+        String blocksJson = BlockKitBuilder.buildIssueCreatedBlocks(key, url, classification, similar);
 
-        slackNotifier.postThreadReply(command.channel(), command.eventTs(), message.toString());
+        slackNotifier.postBlockMessage(command.channel(), command.eventTs(), fallbackText, blocksJson);
     }
 
     private String resolveReporterName(String slackUserId) {
