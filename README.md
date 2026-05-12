@@ -96,7 +96,7 @@ ngrok http 3000
 | `@봇더지라 help` | 도움말 표시 |
 | `@봇더지라 scrum` | 스프린트 일일 리포트 |
 | `@봇더지라 내작업` | 내 진행 중인 작업 조회 |
-| `@봇더지라 작업 김영현` | 특정 팀원의 작업 조회 |
+| `@봇더지라 작업 Alice` | 특정 팀원의 작업 조회 |
 | `@봇더지라 검색 <키워드>` | 이슈 제목으로 검색 |
 | `@봇더지라 sync` | Jira → DB 수동 동기화 |
 | `@봇더지라 완료` | 이슈 스레드에서 → Jira 완료 처리 |
@@ -167,15 +167,18 @@ NOTIFY_MENTION=MENTION
 
 ### 알림 메시지 예시
 
+실제 봇이 Slack 에 보내는 메시지는 `<URL|텍스트>` 형식의 Slack 링크와 `<@SLACK_ID>` 형식의 멘션을 사용합니다 (Slack 클라이언트가 렌더링 시 클릭 가능한 링크 / 알림으로 변환).
+
 ```
-:arrows_counterclockwise: <ES2-100> 결제 금액 0원 표시 버그
+:arrows_counterclockwise: <https://your-site.atlassian.net/browse/ES2-100|ES2-100> 결제 금액 0원 표시 버그
 상태: 해야 할 일 → 진행 중
-담당자: 미배정 → 김영현
-reporter: @임종승
-변경자: @김영현
+담당자: 미배정 → Bob
+reporter: <@U03ALICE000>
+변경자: <@U03BOB00000>
+신규 담당자: <@U03BOB00000>
 ```
 
-`notify.mention=PLAIN` 으로 두면 `@임종승` 같은 멘션이 평문 displayName 으로 출력되어 알림이 발생하지 않습니다.
+매핑이 없는 사용자는 멘션 자리에 Jira displayName 평문이 그대로 들어갑니다 (`@` 도 붙지 않음). `notify.mention=PLAIN` 으로 두면 모든 사용자에 대해 평문으로만 출력되어 Slack 알림이 발생하지 않습니다.
 
 ## 스크립트
 
@@ -210,7 +213,7 @@ Slack 이름과 Jira 이름이 다를 때 매핑을 등록합니다.
 ./scripts/register-user-mapping.sh
 
 # 직접 등록
-./scripts/register-user-mapping.sh U03L1TJ0EBB 김영현
+./scripts/register-user-mapping.sh U03L1TJ0EBB Alice
 
 # 등록된 매핑 목록 조회
 ./scripts/register-user-mapping.sh --list

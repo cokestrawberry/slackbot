@@ -2,6 +2,7 @@ package com.jirabot.slack.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.dao.DataIntegrityViolationException;
 import com.jirabot.slack.client.SlackNotifier;
 import com.jirabot.slack.config.JiraProperties;
 import com.jirabot.slack.config.JiraWebhookProperties;
@@ -15,6 +16,8 @@ import com.jirabot.slack.repository.IssueRepository;
 import com.jirabot.slack.repository.ProcessedJiraChangelogRepository;
 import com.jirabot.slack.repository.UserMappingRepository;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,9 +27,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 // STUDY: Jira → 봇 webhook 처리의 핵심.
-//        1) idempotency 체크 (processed_jira_changelog) → 2) 봇 이슈 여부 확인 → 3) trigger 평가
-//        → 4) 메시지 빌드 + Slack 전송 → 5) DB 일관성 (IssueEntity.updateFrom) → 6) 처리 기록 저장.
-//        실패해도 항상 200 반환을 보장하기 위해 호출 측에서 예외를 삼키지 않고 그대로 위로 던진다 (컨트롤러가 200 회신).
+//        1) idempotency 기록(processed_jira_changelog) 을 save-first 로 잡아 race 차단
+//        → 2) 봇 이슈 여부 확인 → 3) trigger 평가
+//        → 4) 메시지 빌드 + Slack 전송 → 5) DB 일관성 (IssueEntity.updateFrom).
+//        예외는 모두 본 메서드에서 catch + warn 한다 — 컨트롤러는 인증 통과 후 항상 200 으로 회신하므로
+//        Jira 재시도 폭주를 막는 책임이 컨트롤러에 있고, 서비스는 처리 실패가 호출 스택을 깨지 않도록 보장.
 @Service
 public class JiraWebhookServiceImpl implements JiraWebhookService {
 
@@ -72,7 +77,15 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
                 log.debug("Webhook ignored: changelog.id missing");
                 return;
             }
-            if (processedRepo.existsById(changelogId)) {
+
+            // STUDY: idempotency 를 save-first 로 잡는다. saveAndFlush 가 즉시 INSERT 를 발생시키고,
+            //        PK 충돌(DataIntegrityViolationException)이면 다른 요청이 먼저 기록한 것이므로
+            //        본 요청은 중복 처리하지 않고 종료한다. existsById + save 두 호출 사이의 race window 가 사라진다.
+            //        또한 이 가드를 모든 early return 보다 먼저 두면 비봇 이슈/스레드 없음 같은 케이스에서도
+            //        같은 changelogId 가 재전송될 때 다시 처리되는 일이 없다.
+            try {
+                processedRepo.saveAndFlush(new ProcessedJiraChangelog(changelogId));
+            } catch (DataIntegrityViolationException duplicate) {
                 log.info("Webhook duplicate ignored changelogId={}", changelogId);
                 return;
             }
@@ -96,7 +109,6 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
 
             List<JiraChangelog> items = parseChangelogItems(root.path("changelog").path("items"));
             if (items.isEmpty()) {
-                processedRepo.save(new ProcessedJiraChangelog(changelogId));
                 return;
             }
 
@@ -110,11 +122,10 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
             } else {
                 log.debug("Webhook below threshold notify-on={} items={}", webhookProps.notifyOn(), items.size());
             }
-
-            processedRepo.save(new ProcessedJiraChangelog(changelogId));
         } catch (Exception e) {
-            // STUDY: 예외 시에도 컨트롤러가 200 으로 응답하지만, 디버깅 위해 warn 로그 남긴다.
-            //        idempotency 기록을 못 남기므로 다음 재전송 시 다시 시도된다 (정상 동작 회복).
+            // STUDY: 처리 중 어떤 예외가 나더라도 컨트롤러는 200 을 회신하므로 Jira 재시도 폭주를 막는다.
+            //        idempotency 기록은 이미 save-first 에서 남았으므로, 같은 changelogId 가 다시 와도 위에서 차단된다.
+            //        다만 본 요청의 처리는 누락되므로 운영자가 warn 로그로 인지할 수 있도록 stack trace 와 함께 기록.
             log.warn("Jira webhook processing failed: {}", e.toString(), e);
         }
     }
@@ -240,7 +251,7 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
                 ? null : assigneeNode.path("displayName").asText(issue.getAssignee());
         JsonNode spNode = fields.path("customfield_10016");
         Double storyPoint = (spNode.isMissingNode() || spNode.isNull()) ? issue.getStoryPoint() : spNode.asDouble();
-        Instant jiraUpdated = parseInstantOrFallback(fields.path("updated").asText(null));
+        Instant jiraUpdated = parseInstantOrFallback(fields.path("updated").asText(null), issue.getJiraUpdated());
 
         issue.updateFrom(summary, issueType, status, statusCategory, assignee, storyPoint, jiraUpdated);
         issueRepository.save(issue);
@@ -259,13 +270,24 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
         };
     }
 
-    private Instant parseInstantOrFallback(String iso) {
-        if (iso == null || iso.isBlank()) return Instant.now();
+    // STUDY: Jira webhook 의 updated 필드는 "2025-12-31T01:23:45.000+0900" 처럼 offset 에 콜론이 없는 형태로 온다.
+    //        Instant.parse 는 "+09:00" 형식만 허용해 위 입력을 거부하므로 명시적 DateTimeFormatter 패턴을 우선 적용한다.
+    //        실패 시 ISO-8601 표준 형식(예: "+09:00")으로 한 번 더 시도하고, 그래도 실패하면 기존 값(fallback)을 유지해
+    //        DB 의 jiraUpdated 가 Instant.now() 로 덮여 Jira 와 drift 되는 사고를 막는다.
+    private static final DateTimeFormatter JIRA_TS_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+
+    private Instant parseInstantOrFallback(String raw, Instant fallback) {
+        if (raw == null || raw.isBlank()) return fallback;
         try {
-            // STUDY: Jira 의 timestamp 는 "2025-12-31T01:23:45.000+0900" 형태. Instant.parse 가 거부할 수 있어 try/catch.
-            return Instant.parse(iso);
-        } catch (DateTimeParseException e) {
-            return Instant.now();
+            return OffsetDateTime.parse(raw, JIRA_TS_FORMAT).toInstant();
+        } catch (DateTimeParseException e1) {
+            try {
+                return Instant.parse(raw);
+            } catch (DateTimeParseException e2) {
+                log.debug("Unparseable Jira timestamp '{}', keeping existing jiraUpdated", raw);
+                return fallback;
+            }
         }
     }
 
