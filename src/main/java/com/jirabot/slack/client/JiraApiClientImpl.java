@@ -341,8 +341,10 @@ public class JiraApiClientImpl implements JiraApiClient {
                     "project = %s AND text ~ \"%s\" ORDER BY updated DESC",
                     props.projectKey(), safeQuery);
 
+            // STUDY: Atlassian 이 /rest/api/3/search 를 제거하고 /rest/api/3/search/jql 로 일원화함 (CHANGE-2046).
+            //        응답 스키마의 issues[] 는 동일하게 유지되어 파싱 로직은 그대로 사용 가능.
             String json = jiraWebClient.get()
-                    .uri(uri -> uri.path("/rest/api/3/search")
+                    .uri(uri -> uri.path("/rest/api/3/search/jql")
                             .queryParam("jql", jql)
                             .queryParam("fields", "summary,status,assignee")
                             .queryParam("maxResults", Math.max(1, Math.min(maxResults, 50)))
