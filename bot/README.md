@@ -20,8 +20,8 @@ through so Spring Boot's `SlackSignatureFilter` can validate them.
 
 ## Environment variables
 
-Loaded from `/home/yhkim/slackbot/.env` (repo root) if present, else from
-the shell environment.
+Loaded from the repo-root `.env` if present (`source ../.env` from inside
+`bot/`), else from the shell environment.
 
 | Variable                | Required | Default                                    | Notes |
 |-------------------------|----------|--------------------------------------------|-------|
@@ -97,6 +97,14 @@ are stripped):
 - 4xx from Spring Boot is treated as permanent (bot returns 502, does **not**
   retry — Slack itself will retry per its own schedule).
 - SIGINT/SIGTERM triggers `http.Server.Shutdown` with a 10 s drain timeout.
+
+## Deployment note: do not expose the bot port directly
+
+The bot does NOT verify Slack's HMAC; it relies on Spring to do so. If port
+`3000` is exposed to the public internet without ngrok (or another tunnel
+that fronts the bot), an attacker can call `/slack/events` with arbitrary
+payloads. The intended topology is **Slack → ngrok → bot:3000 → spring:8080**;
+the bot port must remain behind the tunnel or behind a firewall.
 
 ## Tests
 

@@ -24,12 +24,15 @@ func LoadConfig() (Config, error) {
 		ForwardTimeout: 5 * time.Second,
 	}
 
-	// Signing secret / bot token are not used by the proxy itself today, but
-	// validate presence so misconfiguration surfaces at startup rather than
-	// after the first Slack event. BotToken is allowed to be empty for now —
-	// reserved for future outbound Slack API calls (reactions, replies, etc.).
+	// SLACK_SIGNING_SECRET is intentionally validated here even though this proxy
+	// does NOT perform HMAC verification itself — that responsibility is owned by
+	// SlackSignatureFilter on the Spring side. The startup check exists purely so
+	// that env-parity mistakes (e.g. a missing variable in .env) surface
+	// immediately rather than after the first Slack event hits Spring and 403s.
+	// BotToken is allowed to be empty for now — reserved for future outbound
+	// Slack API calls (reactions, replies, etc.) from the bot.
 	if strings.TrimSpace(cfg.SigningSecret) == "" {
-		return Config{}, fmt.Errorf("SLACK_SIGNING_SECRET is required")
+		return Config{}, fmt.Errorf("SLACK_SIGNING_SECRET is required (startup env-parity check; HMAC is verified by Spring)")
 	}
 	if !strings.HasPrefix(cfg.SpringURL, "http://") && !strings.HasPrefix(cfg.SpringURL, "https://") {
 		return Config{}, fmt.Errorf("SPRING_EVENT_URL must be an http(s) URL, got %q", cfg.SpringURL)

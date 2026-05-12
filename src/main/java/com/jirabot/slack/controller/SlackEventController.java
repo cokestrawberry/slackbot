@@ -6,6 +6,7 @@ import com.jirabot.slack.client.SlackNotifier;
 import com.jirabot.slack.client.ThreadActionClassifier;
 import com.jirabot.slack.client.dto.IntentResult;
 import com.jirabot.slack.client.dto.ThreadActionResult;
+import com.jirabot.slack.config.AsyncConfig;
 import com.jirabot.slack.dto.IssueCreateCommand;
 import com.jirabot.slack.dto.SlackEventEnvelope;
 import com.jirabot.slack.dto.SlackEventInner;
@@ -17,13 +18,19 @@ import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.IssueCreateService;
 import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ScrumReportService;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Executor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.util.StreamUtils;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -38,31 +45,21 @@ public class SlackEventController {
 
     private static final Logger log = LoggerFactory.getLogger(SlackEventController.class);
 
-    // STUDY: 하이브리드 라우팅 — 키워드 매칭 먼저, 실패 시 Claude 분류로 fallback.
-    //        키워드 명령은 즉시 실행(0초), Claude 분류는 비동기(~30초).
-    private static final String HELP_TEXT = """
-            :robot_face: *지라봇 사용법*
+    // STUDY: HELP_TEXT는 classpath:help-text.md 에서 startup에 로드한다. 기존엔 클래스 상수로
+    //        하드코딩되어 변경 시 재컴파일이 필요했지만, 외부 리소스로 분리하면 빌드 산출물의
+    //        리소스만 갱신해도 반영된다. 또한 동일 콘텐츠를 HELP.md 문서와 single source of truth로
+    //        유지하기 쉬워진다.
+    private static final String HELP_TEXT_RESOURCE = "help-text.md";
+    private static final String HELP_TEXT = loadHelpText();
 
-            *키워드 명령 (즉시 실행):*
-              `@지라 help` — 이 도움말 표시
-              `@지라 scrum` — 스프린트 일일 리포트
-              `@지라 내작업` — 내 진행 중인 작업 조회
-              `@지라 작업 김영현` — 특정 팀원의 작업 조회
-              `@지라 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
-              `@지라 sync` — Jira 이슈를 로컬 DB에 동기화
-              `@지라 완료` — 이슈 스레드에서 → Jira 완료 처리
-
-            *스레드 액션 (이슈 스레드에서 댓글로 사용):*
-              `@지라 하위작업 <내용>` — 하위작업 생성
-              `@지라 댓글 <내용>` — Jira 코멘트 추가
-              `@지라 수정 <내용>` — Jira 설명에 내용 추가
-              또는 자연어로 입력하면 AI가 액션을 판단합니다.
-
-            *자연어 입력 (AI 분류 → Jira 이슈 생성):*
-              `@지라 로그인 페이지에서 500 에러 발생` → :bug: 버그로 등록
-              `@지라 다크모드 지원해주세요` → :pencil: 기능 요청으로 등록
-
-            이슈 등록 시 AI가 자동으로 분류(BUG/FEATURE/OTHER)하고 Story Point를 추정합니다.""";
+    private static String loadHelpText() {
+        try (var is = new ClassPathResource(HELP_TEXT_RESOURCE).getInputStream()) {
+            return StreamUtils.copyToString(is, StandardCharsets.UTF_8).strip();
+        } catch (IOException e) {
+            log.warn("help-text resource missing, falling back to minimal text: {}", e.toString());
+            return ":robot_face: 지라 (help 리소스를 찾을 수 없습니다)";
+        }
+    }
 
     private final IssueCreateService issueCreateService;
     private final ScrumReportService scrumReportService;
@@ -74,6 +71,8 @@ public class SlackEventController {
     private final IntentFailureRepository intentFailureRepository;
     private final UserMappingRepository userMappingRepository;
     private final SlackNotifier slackNotifier;
+    private final Executor slackExecutor;
+    private final SlackEventDeduplicator deduplicator;
     private final Set<String> allowedChannels;
 
     public SlackEventController(IssueCreateService issueCreateService,
@@ -86,6 +85,8 @@ public class SlackEventController {
                                 IntentFailureRepository intentFailureRepository,
                                 UserMappingRepository userMappingRepository,
                                 SlackNotifier slackNotifier,
+                                @Qualifier(AsyncConfig.SLACK_EXECUTOR) Executor slackExecutor,
+                                SlackEventDeduplicator deduplicator,
                                 @Value("${slack.allowed-channels:}") String allowedChannelsConfig) {
         this.issueCreateService = issueCreateService;
         this.scrumReportService = scrumReportService;
@@ -97,6 +98,8 @@ public class SlackEventController {
         this.intentFailureRepository = intentFailureRepository;
         this.userMappingRepository = userMappingRepository;
         this.slackNotifier = slackNotifier;
+        this.slackExecutor = slackExecutor;
+        this.deduplicator = deduplicator;
         // STUDY: 허용 채널이 비어있으면 모든 채널 허용. 쉼표 구분으로 파싱.
         if (allowedChannelsConfig == null || allowedChannelsConfig.isBlank()) {
             this.allowedChannels = Set.of();
@@ -183,7 +186,7 @@ public class SlackEventController {
         }
 
         // Haiku 스레드 액션 분류
-        new Thread(() -> {
+        slackExecutor.execute(() -> {
             log.info("Thread action classification for issue={} input='{}'", parentIssue.getIssueKey(), cleaned);
 
             List<String> threadMessages = slackNotifier.getThreadMessages(event.channel(), threadTs);
@@ -210,11 +213,11 @@ public class SlackEventController {
                 default -> replyInThread(event, threadTs,
                         ":thinking_face: 이해하지 못했어요.");
             }
-        }).start();
+        });
     }
 
     private void executeSubTask(SlackEventInner event, IssueEntity parentIssue, String content) {
-        new Thread(() -> {
+        slackExecutor.execute(() -> {
             try {
                 // STUDY: Haiku 분류 → Sonnet 상세화(제목/SP) → Jira 하위작업 생성
                 var intentHint = new IntentResult("register_story", 0.9, Map.of("keyword", content), content);
@@ -230,11 +233,11 @@ public class SlackEventController {
                 replyInThread(event, event.thread_ts(),
                         ":x: 하위작업 생성에 실패했습니다: " + e.getMessage());
             }
-        }).start();
+        });
     }
 
     private void executeComment(SlackEventInner event, IssueEntity parentIssue, String content) {
-        new Thread(() -> {
+        slackExecutor.execute(() -> {
             try {
                 jiraApiClient.addComment(parentIssue.getIssueKey(), content);
                 replyInThread(event, event.thread_ts(), String.format(
@@ -244,11 +247,11 @@ public class SlackEventController {
                 replyInThread(event, event.thread_ts(),
                         ":x: 코멘트 추가에 실패했습니다: " + e.getMessage());
             }
-        }).start();
+        });
     }
 
     private void executeModify(SlackEventInner event, IssueEntity parentIssue, String content) {
-        new Thread(() -> {
+        slackExecutor.execute(() -> {
             try {
                 jiraApiClient.appendDescription(parentIssue.getIssueKey(), content);
                 replyInThread(event, event.thread_ts(), String.format(
@@ -258,7 +261,7 @@ public class SlackEventController {
                 replyInThread(event, event.thread_ts(),
                         ":x: 설명 수정에 실패했습니다: " + e.getMessage());
             }
-        }).start();
+        });
     }
 
     private void replyInThread(SlackEventInner event, String threadTs, String message) {
@@ -270,7 +273,7 @@ public class SlackEventController {
     // STUDY: 키워드 매칭 실패 시 Haiku로 1차 의도 분류 → intent별 후속 처리.
     //        Haiku 실패/unknown 시 Sonnet 호출하지 않고 안내 메시지만 반환.
     private void handleWithIntent(SlackEventInner event, String cleaned) {
-        new Thread(() -> {
+        slackExecutor.execute(() -> {
             IntentResult intent = intentClassifier.classify(cleaned);
             log.info("Haiku classified: intent={} confidence={} input='{}'",
                     intent.intent(), intent.confidence(), cleaned);
@@ -302,7 +305,7 @@ public class SlackEventController {
                 default ->
                         replyThread(event, ":thinking_face: 이해하지 못했어요. `@지라 help`로 사용 가능한 명령을 확인해주세요.");
             }
-        }).start();
+        });
     }
 
     private void replyThread(SlackEventInner event, String message) {
@@ -319,20 +322,32 @@ public class SlackEventController {
 
     private void handleScrum(SlackEventInner event) {
         log.info("Scrum report requested by user={}", event.user());
-        scrumReportService.generateReport().thenAccept(report -> {
-            if (event.channel() != null) {
-                slackNotifier.postMessage(event.channel(), report);
-            }
-        });
+        scrumReportService.generateReport()
+                .thenAccept(report -> {
+                    if (event.channel() != null) {
+                        slackNotifier.postMessage(event.channel(), report);
+                    }
+                })
+                .exceptionally(ex -> {
+                    log.warn("Scrum report failed: {}", ex.toString());
+                    replyThread(event, ":x: 스크럼 리포트 생성 중 오류가 발생했어요.");
+                    return null;
+                });
     }
 
     private void handleMyWork(SlackEventInner event) {
         log.info("My work requested by user={}", event.user());
-        scrumReportService.generateMyReport(event.user()).thenAccept(report -> {
-            if (event.channel() != null && event.ts() != null) {
-                slackNotifier.postThreadReply(event.channel(), event.ts(), report);
-            }
-        });
+        scrumReportService.generateMyReport(event.user())
+                .thenAccept(report -> {
+                    if (event.channel() != null && event.ts() != null) {
+                        slackNotifier.postThreadReply(event.channel(), event.ts(), report);
+                    }
+                })
+                .exceptionally(ex -> {
+                    log.warn("My-work report failed for user={}: {}", event.user(), ex.toString());
+                    replyThread(event, ":x: 내 작업 조회 중 오류가 발생했어요.");
+                    return null;
+                });
     }
 
     private void handleSync(SlackEventInner event) {
@@ -340,12 +355,12 @@ public class SlackEventController {
         // STUDY: 동기화는 동기 실행 후 결과를 스레드에 알린다.
         //        @Async가 아닌 이유: 결과 메시지를 바로 받아야 하므로.
         //        다만 Slack 3초 ack는 이미 200을 반환했으므로 블로킹해도 무방.
-        new Thread(() -> {
+        slackExecutor.execute(() -> {
             String result = jiraSyncService.syncActiveSprint();
             if (event.channel() != null && event.ts() != null) {
                 slackNotifier.postThreadReply(event.channel(), event.ts(), result);
             }
-        }).start();
+        });
     }
 
     private void handleComplete(SlackEventInner event) {
@@ -359,7 +374,7 @@ public class SlackEventController {
         }
 
         log.info("Complete requested in thread={} by user={}", event.thread_ts(), event.user());
-        new Thread(() -> {
+        slackExecutor.execute(() -> {
             Optional<IssueEntity> found = issueRepository
                     .findBySlackChannelAndSlackThreadTs(event.channel(), event.thread_ts());
             if (found.isEmpty()) {
@@ -388,7 +403,7 @@ public class SlackEventController {
                         String.format("*%s* 완료 처리에 실패했습니다. Jira에서 직접 확인해주세요.",
                                 issue.getIssueKey()));
             }
-        }).start();
+        });
     }
 
     private void handleRegisterUser(SlackEventInner event, String jiraUsername) {
@@ -428,11 +443,17 @@ public class SlackEventController {
 
     private void handleMemberWork(SlackEventInner event, String memberName) {
         log.info("Member work requested for name={} by user={}", memberName, event.user());
-        scrumReportService.generateMemberReport(memberName).thenAccept(report -> {
-            if (event.channel() != null && event.ts() != null) {
-                slackNotifier.postThreadReply(event.channel(), event.ts(), report);
-            }
-        });
+        scrumReportService.generateMemberReport(memberName)
+                .thenAccept(report -> {
+                    if (event.channel() != null && event.ts() != null) {
+                        slackNotifier.postThreadReply(event.channel(), event.ts(), report);
+                    }
+                })
+                .exceptionally(ex -> {
+                    log.warn("Member-work report failed for name={}: {}", memberName, ex.toString());
+                    replyThread(event, ":x: 작업 조회 중 오류가 발생했어요.");
+                    return null;
+                });
     }
 
     @PostMapping(path = "/event", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -456,6 +477,9 @@ public class SlackEventController {
             }
             if (!isChannelAllowed(event.channel())) {
                 log.debug("Ignoring event from non-allowed channel={}", event.channel());
+                return ResponseEntity.ok(Map.of("ok", true));
+            }
+            if (deduplicator.isDuplicate(event.channel(), event.ts())) {
                 return ResponseEntity.ok(Map.of("ok", true));
             }
             String cleaned = stripMention(event.text());

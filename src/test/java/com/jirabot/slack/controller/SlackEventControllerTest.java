@@ -24,6 +24,7 @@ import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ScrumReportService;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -56,12 +57,14 @@ class SlackEventControllerTest {
         intentFailureRepository = mock(IntentFailureRepository.class);
         userMappingRepository = mock(UserMappingRepository.class);
         slackNotifier = mock(SlackNotifier.class);
+        Executor directExecutor = Runnable::run;
+        SlackEventDeduplicator deduplicator = new SlackEventDeduplicator();
         mockMvc = standaloneSetup(new SlackEventController(
                 issueCreateService, scrumReportService, jiraSyncService,
                 jiraApiClient, issueRepository, intentClassifier,
                 threadActionClassifier, intentFailureRepository,
                 userMappingRepository, slackNotifier,
-                "C1,C2")).build();
+                directExecutor, deduplicator, "C1,C2")).build();
     }
 
     @Test
