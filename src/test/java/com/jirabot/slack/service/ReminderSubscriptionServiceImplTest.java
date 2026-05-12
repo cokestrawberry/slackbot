@@ -39,7 +39,7 @@ class ReminderSubscriptionServiceImplTest {
 
     @Test
     void enable_mappedUser_setsReminderEnabledTrue() {
-        UserMappingEntity mapping = new UserMappingEntity("U1", "limjs", "임종승");
+        UserMappingEntity mapping = new UserMappingEntity("U1", "alice", "Alice");
         when(repository.findBySlackUserId("U1")).thenReturn(Optional.of(mapping));
 
         String reply = service.enable("U1");
@@ -51,7 +51,7 @@ class ReminderSubscriptionServiceImplTest {
 
     @Test
     void enable_alreadyOn_isIdempotent() {
-        UserMappingEntity mapping = new UserMappingEntity("U1", "limjs", "임종승");
+        UserMappingEntity mapping = new UserMappingEntity("U1", "alice", "Alice");
         mapping.setReminderEnabled(true);
         when(repository.findBySlackUserId("U1")).thenReturn(Optional.of(mapping));
 
@@ -73,7 +73,7 @@ class ReminderSubscriptionServiceImplTest {
 
     @Test
     void disable_mappedUser_setsReminderEnabledFalse() {
-        UserMappingEntity mapping = new UserMappingEntity("U1", "limjs", "임종승");
+        UserMappingEntity mapping = new UserMappingEntity("U1", "alice", "Alice");
         mapping.setReminderEnabled(true);
         when(repository.findBySlackUserId("U1")).thenReturn(Optional.of(mapping));
 
@@ -85,7 +85,7 @@ class ReminderSubscriptionServiceImplTest {
 
     @Test
     void status_on_reportsScheduleSummary() {
-        UserMappingEntity mapping = new UserMappingEntity("U1", "limjs", "임종승");
+        UserMappingEntity mapping = new UserMappingEntity("U1", "alice", "Alice");
         mapping.setReminderEnabled(true);
         when(repository.findBySlackUserId("U1")).thenReturn(Optional.of(mapping));
 
@@ -96,7 +96,7 @@ class ReminderSubscriptionServiceImplTest {
 
     @Test
     void status_off_mapped_returnsOff() {
-        UserMappingEntity mapping = new UserMappingEntity("U1", "limjs", "임종승");
+        UserMappingEntity mapping = new UserMappingEntity("U1", "alice", "Alice");
         when(repository.findBySlackUserId("U1")).thenReturn(Optional.of(mapping));
 
         String reply = service.status("U1");

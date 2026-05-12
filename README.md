@@ -95,7 +95,7 @@ ngrok http 3000
 | `@봇더지라 help` | 도움말 표시 |
 | `@봇더지라 scrum` | 스프린트 일일 리포트 |
 | `@봇더지라 내작업` | 내 진행 중인 작업 조회 |
-| `@봇더지라 작업 김영현` | 특정 팀원의 작업 조회 |
+| `@봇더지라 작업 Alice` | 특정 팀원의 작업 조회 |
 | `@봇더지라 검색 <키워드>` | 이슈 제목으로 검색 |
 | `@봇더지라 리마인더 on` / `off` / `상태` | 평일 09:00 KST 미해결 이슈 DM 알림 토글 (기본 OFF, 본인이 직접 켜야 동작) |
 | `@봇더지라 sync` | Jira → DB 수동 동기화 |
@@ -173,7 +173,7 @@ Slack 이름과 Jira 이름이 다를 때 매핑을 등록합니다.
 ./scripts/register-user-mapping.sh
 
 # 직접 등록
-./scripts/register-user-mapping.sh U03L1TJ0EBB 김영현
+./scripts/register-user-mapping.sh U03L1TJ0EBB Alice
 
 # 등록된 매핑 목록 조회
 ./scripts/register-user-mapping.sh --list

@@ -81,8 +81,8 @@ class DailyReminderServiceTest {
     void subscriberWithoutOpenIssues_skipsDm() {
         rebuild(true);
         when(userMappingRepository.findByReminderEnabledTrue())
-                .thenReturn(List.of(subscriber("U1", "임종승")));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("임종승", "완료"))
+                .thenReturn(List.of(subscriber("U1", "Alice")));
+        when(issueRepository.findByAssigneeAndStatusCategoryNot("Alice", "완료"))
                 .thenReturn(List.of());
 
         service.run();
@@ -94,9 +94,9 @@ class DailyReminderServiceTest {
     void subscriberWithOpenIssues_sendsDm() {
         rebuild(true);
         when(userMappingRepository.findByReminderEnabledTrue())
-                .thenReturn(List.of(subscriber("U1", "임종승")));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("임종승", "완료"))
-                .thenReturn(List.of(issue("ES2-100", "로그인 에러", "임종승")));
+                .thenReturn(List.of(subscriber("U1", "Alice")));
+        when(issueRepository.findByAssigneeAndStatusCategoryNot("Alice", "완료"))
+                .thenReturn(List.of(issue("ES2-100", "로그인 에러", "Alice")));
 
         service.run();
 
@@ -109,13 +109,13 @@ class DailyReminderServiceTest {
     @Test
     void oneFailedUser_doesNotBlockOthers() {
         rebuild(true);
-        UserMappingEntity u1 = subscriber("U1", "임종승");
-        UserMappingEntity u2 = subscriber("U2", "김영현");
+        UserMappingEntity u1 = subscriber("U1", "Alice");
+        UserMappingEntity u2 = subscriber("U2", "Bob");
         when(userMappingRepository.findByReminderEnabledTrue()).thenReturn(List.of(u1, u2));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("임종승", "완료"))
-                .thenReturn(List.of(issue("ES2-1", "이슈 A", "임종승")));
-        when(issueRepository.findByAssigneeAndStatusCategoryNot("김영현", "완료"))
-                .thenReturn(List.of(issue("ES2-2", "이슈 B", "김영현")));
+        when(issueRepository.findByAssigneeAndStatusCategoryNot("Alice", "완료"))
+                .thenReturn(List.of(issue("ES2-1", "이슈 A", "Alice")));
+        when(issueRepository.findByAssigneeAndStatusCategoryNot("Bob", "완료"))
+                .thenReturn(List.of(issue("ES2-2", "이슈 B", "Bob")));
         doThrow(new RuntimeException("slack down"))
                 .when(slackNotifier).sendDirectMessage(eq("U1"), anyString());
 
@@ -130,8 +130,8 @@ class DailyReminderServiceTest {
     void buildMessage_includesIssueLinkAndStatus() {
         rebuild(true);
         String message = service.buildMessage(List.of(
-                issue("ES2-1", "이슈 A", "임종승"),
-                issue("ES2-2", "이슈 B", "임종승")));
+                issue("ES2-1", "이슈 A", "Alice"),
+                issue("ES2-2", "이슈 B", "Alice")));
 
         assertThat(message)
                 .contains(":sunny:")
