@@ -29,8 +29,15 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
             - BUG: something is broken, behaves incorrectly, or throws errors.
             - FEATURE: a new capability, enhancement, or UX improvement is requested.
             - OTHER: docs, chores, questions, or anything that is not a bug or feature.
-            - Story points reflect effort + uncertainty. 1 = trivial, 2 = small, 3 = normal, 5 = medium
-              with some unknowns, 8 = large or cross-cutting.
+            - Story points reflect effort + uncertainty using the team's calibrated scale:
+              - 1 = Small (반나절 이하의 가벼운 작업)
+              - 2 = Medium (하루 정도의 일반적인 작업 A)
+              - 3 = Large (1~2일의 일반적인 작업 B)
+              - 5 = X-Large (2~3일의 조금 무거운 작업)
+              - 8 = Warning (3~4일, 스프린트에 넣을 수 있는 최대 크기)
+              - 13 = Too Big (스프린트 한 번에 끝내기 어려울 만큼 큰 작업.
+                반드시 분해해야 한다는 의미는 아니며, 하위작업(subtask)으로 분해해 진행할 수 있다.)
+            - 21 이상에 해당할 만큼 큰 작업이라도 storyPoint 는 13 으로 캡한다 (에픽/프로젝트는 별도 관리 영역).
             - title: <= 120 Korean/English characters, imperative mood.
             - summary: 1-2 concise paragraphs summarizing the problem/request.
             - An INTENT HINT may be provided above the user input.
@@ -57,7 +64,7 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
             --- End of examples ---
 
             You MUST respond with ONLY a valid JSON object matching this exact schema:
-            {"type":"BUG|FEATURE|OTHER","storyPoint":1|2|3|5|8,"title":"...","summary":"..."}
+            {"type":"BUG|FEATURE|OTHER","storyPoint":1|2|3|5|8|13,"title":"...","summary":"..."}
             No markdown fences. No prose. No comments. The entire response must be JSON.parse-able.
             """;
 
