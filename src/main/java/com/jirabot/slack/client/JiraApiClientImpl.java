@@ -337,8 +337,10 @@ public class JiraApiClientImpl implements JiraApiClient {
             // STUDY: JQL 문자열 안에서 큰따옴표는 백슬래시로 escape 해야 한다.
             //        백슬래시 자체와 역따옴표류는 매우 드문 케이스이므로 따옴표만 우선 처리한다.
             String safeQuery = query.replace("\\", "\\\\").replace("\"", "\\\"");
+            // STUDY: statusCategory != Done 으로 완료/종료/Closed/Resolved 등 모든 종결 상태를 한 번에 제외한다.
+            //        status name 은 사이트 언어/워크플로마다 달라(완료/종료/Done/Closed/Resolved) 카테고리 기준이 안전.
             String jql = String.format(
-                    "project = %s AND text ~ \"%s\" ORDER BY updated DESC",
+                    "project = %s AND statusCategory != Done AND text ~ \"%s\" ORDER BY updated DESC",
                     props.projectKey(), safeQuery);
 
             // STUDY: Atlassian 이 /rest/api/3/search 를 제거하고 /rest/api/3/search/jql 로 일원화함 (CHANGE-2046).
