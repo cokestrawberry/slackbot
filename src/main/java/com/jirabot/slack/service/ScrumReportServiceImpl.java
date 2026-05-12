@@ -2,16 +2,22 @@ package com.jirabot.slack.service;
 
 import com.jirabot.slack.client.SlackNotifier;
 import com.jirabot.slack.entity.IssueEntity;
+import com.jirabot.slack.entity.StatusCategory;
 import com.jirabot.slack.entity.UserMappingEntity;
 import com.jirabot.slack.repository.IssueRepository;
 import com.jirabot.slack.repository.UserMappingRepository;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
+import org.springframework.data.domain.PageRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
@@ -115,6 +121,233 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         }
     }
 
+    // STUDY: @Async 메서드는 CompletableFuture를 반환하여 비동기 실행 결과를 전달한다.
+    //        Spring이 내부적으로 지정된 Executor 스레드에서 메서드를 실행하고, 결과를 Future에 담는다.
+    @Async("slackTaskExecutor")
+    @Override
+    public CompletableFuture<String> generateStatisticsReport() {
+        try {
+            // STUDY: 가장 최근에 동기화된 스프린트를 찾아 해당 스프린트의 이슈만 통계에 포함.
+            //        스프린트 정보가 없으면 (동기화 전) 안내 메시지 반환.
+            List<Object[]> sprintInfoList = issueRepository.findLatestSprintInfo(PageRequest.of(0, 1));
+            if (sprintInfoList.isEmpty()) {
+                return CompletableFuture.completedFuture(
+                        "스프린트 정보가 없습니다. `@지라 sync`로 동기화해주세요.");
+            }
+
+            Object[] sprintRow = sprintInfoList.get(0);
+            int sprintId = (Integer) sprintRow[0];
+            String sprintName = (String) sprintRow[1];
+
+            List<Object[]> statusStats = issueRepository.countAndSumGroupByStatusAndSprint(sprintId);
+            if (statusStats.isEmpty()) {
+                return CompletableFuture.completedFuture(
+                        String.format("스프린트 '%s'에 이슈가 없습니다.", sprintName));
+            }
+
+            String report = formatStatisticsReport(statusStats, sprintId, sprintName);
+            log.info("Statistics report generated for sprint='{}' (id={})", sprintName, sprintId);
+            return CompletableFuture.completedFuture(report);
+        } catch (Exception e) {
+            log.error("Statistics report generation failed: {}", e.toString());
+            return CompletableFuture.completedFuture("통계 리포트 생성에 실패했습니다: " + e.getMessage());
+        }
+    }
+
+    // STUDY: completedAt이 null인 이슈의 완료 시점을 jiraUpdated로 대체. jiraUpdated는 완료 후에도
+    //        댓글/수정으로 갱신될 수 있어 정확한 완료 시점이 아닐 수 있다 (근사치).
+    private Instant effectiveCompletedAt(IssueEntity issue) {
+        return issue.getCompletedAt() != null ? issue.getCompletedAt() : issue.getJiraUpdated();
+    }
+
+    private String formatStatisticsReport(List<Object[]> statusStats, int sprintId, String sprintName) {
+        ZoneId kst = ZoneId.of("Asia/Seoul");
+        LocalDate today = LocalDate.now(kst);
+        Instant todayStart = today.atStartOfDay(kst).toInstant();
+
+        // STUDY: DB GROUP BY 결과를 Map으로 변환. Object[] = [statusCategory, count, sumSp].
+        Map<String, long[]> statsMap = new HashMap<>();
+        long totalCount = 0;
+        double totalSp = 0;
+        for (Object[] row : statusStats) {
+            String status = (String) row[0];
+            long count = (Long) row[1];
+            double sp = ((Number) row[2]).doubleValue();
+            statsMap.put(status, new long[]{count, (long) sp});
+            totalCount += count;
+            totalSp += sp;
+        }
+
+        long[] doneStats = statsMap.getOrDefault(StatusCategory.DONE, new long[]{0, 0});
+        long completedCount = doneStats[0];
+        double completedSp = doneStats[1];
+        double remainingSp = totalSp - completedSp;
+
+        boolean useCounts = totalSp == 0;
+        double ratio = useCounts
+                ? (totalCount > 0 ? (double) completedCount / totalCount : 0)
+                : (totalSp > 0 ? completedSp / totalSp : 0);
+        int percent = (int) (ratio * 100);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(":bar_chart: *스프린트 '%s' 통계 요약*\n\n", sprintName));
+
+        // 진척률 섹션
+        sb.append(":fire: *진척률*\n");
+        if (useCounts) {
+            sb.append(String.format("  전체: %d건 | 완료: %d건 | 남음: %d건\n",
+                    totalCount, completedCount, totalCount - completedCount));
+        } else {
+            sb.append(String.format("  전체: %.0f SP | 완료: %.0f SP | 남음: %.0f SP\n",
+                    totalSp, completedSp, remainingSp));
+        }
+        sb.append(String.format("  %s %d%%\n\n", progressBar(ratio), percent));
+
+        // 상태별 현황 — statsMap에서 직접 출력
+        sb.append(":clipboard: *상태별 현황*\n");
+        appendStatusCountFromStats(sb, statsMap.get(StatusCategory.DONE), ":white_check_mark: 완료");
+        appendStatusCountFromStats(sb, statsMap.get(StatusCategory.IN_PROGRESS), ":hammer: 진행 중");
+        appendStatusCountFromStats(sb, statsMap.get(StatusCategory.TODO), ":clipboard: 해야 할 일");
+        sb.append("\n");
+
+        // 오늘 해결된 이슈 — 스프린트 내에서만 조회
+        List<IssueEntity> todayCompleted = issueRepository.findCompletedSinceInSprint(
+                StatusCategory.DONE, todayStart, sprintId);
+        sb.append(":trophy: *오늘 해결된 이슈*\n");
+        if (todayCompleted.isEmpty()) {
+            sb.append("  (없음)\n");
+        } else {
+            double todaySp = 0;
+            for (IssueEntity i : todayCompleted) {
+                String assignee = i.getAssignee() != null ? i.getAssignee() : "미배정";
+                // STUDY: completedAt이 null인 이슈는 jiraUpdated를 fallback으로 사용하므로
+                //        실제 완료 시점이 아닐 수 있다. "(추정)" 표시로 사용자에게 알린다.
+                String approx = i.getCompletedAt() == null ? " (추정)" : "";
+                sb.append(String.format("  • %s %s (%s, 담당: %s)%s\n",
+                        issueLink(i.getIssueKey()), i.getSummary(),
+                        spLabel(i.getStoryPoint()), assignee, approx));
+                todaySp += i.getStoryPoint() != null ? i.getStoryPoint() : 0;
+            }
+            if (todaySp > 0) {
+                sb.append(String.format("  → 오늘 %.0f SP 완료!\n", todaySp));
+            }
+        }
+        sb.append("\n");
+
+        // 현재 진행 중 — 스프린트 내에서만 조회
+        List<IssueEntity> inProgress = issueRepository.findByStatusCategoryAndSprintId(
+                StatusCategory.IN_PROGRESS, sprintId);
+        if (!inProgress.isEmpty()) {
+            sb.append(":hammer: *현재 진행 중*\n");
+            for (IssueEntity i : inProgress) {
+                String assignee = i.getAssignee() != null ? i.getAssignee() : "미배정";
+                sb.append(String.format("  • %s %s (%s, 담당: %s)\n",
+                        issueLink(i.getIssueKey()), i.getSummary(),
+                        spLabel(i.getStoryPoint()), assignee));
+            }
+            sb.append("\n");
+        }
+
+        // 가장 큰 이슈 (미완료 중 최대 SP) — 스프린트 내에서만 조회
+        List<IssueEntity> biggest = issueRepository.findTopUncompletedBySpInSprint(
+                StatusCategory.DONE, sprintId, PageRequest.of(0, 1));
+        if (!biggest.isEmpty()) {
+            IssueEntity i = biggest.get(0);
+            String assignee = i.getAssignee() != null ? i.getAssignee() : "미배정";
+            sb.append(String.format(":pushpin: *가장 큰 이슈 (미완료)*\n  • %s %s (SP %.0f, %s, 담당: %s)\n\n",
+                    issueLink(i.getIssueKey()), i.getSummary(),
+                    i.getStoryPoint(), i.getStatusCategory(), assignee));
+        }
+
+        // STUDY: 번업 차트 — 스프린트 내 완료 이슈만 로드하여 O(N log N) 정렬 + O(N) 순회.
+        List<IssueEntity> completedIssues = issueRepository.findByStatusCategoryAndSprintId(
+                StatusCategory.DONE, sprintId);
+        sb.append(":chart_with_upwards_trend: *번업 (최근 7일)*\n");
+        double totalForBurnup = useCounts ? totalCount : totalSp;
+        appendBurnupChart(sb, completedIssues, today, kst, totalForBurnup, useCounts);
+
+        return sb.toString();
+    }
+
+    // STUDY: O(N log N) 정렬 + O(N) 순회로 7일 번업 차트를 생성.
+    //        기존: 7일 × 전체 이슈 스트림 필터링 = O(7*N). 개선: 정렬 1회 + 포인터 순회.
+    private void appendBurnupChart(StringBuilder sb, List<IssueEntity> completedIssues,
+                                    LocalDate today, ZoneId kst,
+                                    double totalForBurnup, boolean useCounts) {
+        DateTimeFormatter dateFmt = DateTimeFormatter.ofPattern("MM/dd");
+
+        // effectiveCompletedAt 기준으로 정렬
+        List<IssueEntity> sorted = new ArrayList<>(completedIssues);
+        sorted.sort(Comparator.comparing(
+                i -> effectiveCompletedAt(i) != null ? effectiveCompletedAt(i) : Instant.MIN));
+
+        // 7일 전 자정까지의 누적값을 미리 계산 (base)
+        Instant sevenDaysAgoEnd = today.minusDays(6).atStartOfDay(kst).toInstant();
+        double baseCumulative = 0;
+        int baseIndex = 0;
+        for (int idx = 0; idx < sorted.size(); idx++) {
+            Instant effective = effectiveCompletedAt(sorted.get(idx));
+            if (effective != null && effective.isBefore(sevenDaysAgoEnd)) {
+                if (useCounts) {
+                    baseCumulative++;
+                } else {
+                    baseCumulative += sorted.get(idx).getStoryPoint() != null
+                            ? sorted.get(idx).getStoryPoint() : 0;
+                }
+                baseIndex = idx + 1;
+            }
+        }
+
+        // 각 날짜의 경계까지 포인터를 전진하며 누적
+        double cumulative = baseCumulative;
+        int pointer = baseIndex;
+        for (int d = 6; d >= 0; d--) {
+            LocalDate date = today.minusDays(d);
+            Instant dayEnd = date.plusDays(1).atStartOfDay(kst).toInstant();
+
+            while (pointer < sorted.size()) {
+                Instant effective = effectiveCompletedAt(sorted.get(pointer));
+                if (effective != null && effective.isBefore(dayEnd)) {
+                    if (useCounts) {
+                        cumulative++;
+                    } else {
+                        cumulative += sorted.get(pointer).getStoryPoint() != null
+                                ? sorted.get(pointer).getStoryPoint() : 0;
+                    }
+                    pointer++;
+                } else {
+                    break;
+                }
+            }
+
+            double burnupRatio = totalForBurnup > 0 ? cumulative / totalForBurnup : 0;
+            String bar = progressBar(burnupRatio);
+            String unit = useCounts ? "건" : "SP";
+            sb.append(String.format("  %s %s %.0f/%.0f %s\n",
+                    date.format(dateFmt), bar, cumulative, totalForBurnup, unit));
+        }
+    }
+
+    // STUDY: 프로그레스 바를 20칸 고정 폭 텍스트로 렌더링. Slack에서 모노스페이스처럼 시각화.
+    String progressBar(double ratio) {
+        int filled = (int) (ratio * 20);
+        if (filled < 0) filled = 0;
+        if (filled > 20) filled = 20;
+        return "█".repeat(filled) + "░".repeat(20 - filled);
+    }
+
+    // STUDY: SP 값을 사람이 읽기 쉬운 형태로 변환. null이나 0이면 "-" 표시.
+    //        기존 spText()와 달리 괄호 없이 값만 반환하여 호출측에서 포맷을 조합한다.
+    private String spLabel(Double sp) {
+        return sp != null && sp > 0 ? String.format("SP %.0f", sp) : "SP -";
+    }
+
+    private void appendStatusCountFromStats(StringBuilder sb, long[] stats, String label) {
+        long count = stats != null ? stats[0] : 0;
+        long sp = stats != null ? stats[1] : 0;
+        sb.append(String.format("  %s: %d건 (%d SP)\n", label, count, sp));
+    }
+
     private String formatReport(List<IssueEntity> issues) {
         StringBuilder sb = new StringBuilder();
         LocalDate today = LocalDate.now(ZoneId.of("Asia/Seoul"));
@@ -126,12 +359,12 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         // 어제~오늘 수정된 이슈 (진행한 업무)
         List<IssueEntity> recentlyUpdated = issues.stream()
                 .filter(i -> i.getJiraUpdated() != null && !i.getJiraUpdated().isBefore(since))
-                .filter(i -> !"해야 할 일".equals(i.getStatusCategory()))
+                .filter(i -> !StatusCategory.TODO.equals(i.getStatusCategory()))
                 .toList();
 
         // 해야 할 일 (담당자별)
         Map<String, List<IssueEntity>> todoByAssignee = issues.stream()
-                .filter(i -> "해야 할 일".equals(i.getStatusCategory()))
+                .filter(i -> StatusCategory.TODO.equals(i.getStatusCategory()))
                 .collect(Collectors.groupingBy(
                         i -> i.getAssignee() != null ? i.getAssignee() : "미배정"));
 
@@ -154,8 +387,8 @@ public class ScrumReportServiceImpl implements ScrumReportService {
                 if (!worked.isEmpty()) {
                     Map<String, List<IssueEntity>> byStatus = worked.stream()
                             .collect(Collectors.groupingBy(IssueEntity::getStatusCategory));
-                    appendStatusSection(sb, byStatus.get("완료"), "완료됨 :white_check_mark:");
-                    appendStatusSection(sb, byStatus.get("진행 중"), "진행 중 :hammer:");
+                    appendStatusSection(sb, byStatus.get(StatusCategory.DONE), "완료됨 :white_check_mark:");
+                    appendStatusSection(sb, byStatus.get(StatusCategory.IN_PROGRESS), "진행 중 :hammer:");
                 }
 
                 List<IssueEntity> todo = todoByAssignee.getOrDefault(assignee, List.of());
@@ -173,7 +406,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
 
         // SP 집계
         double completedSp = issues.stream()
-                .filter(i -> "완료".equals(i.getStatusCategory()))
+                .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         double totalSp = issues.stream()
@@ -187,12 +420,12 @@ public class ScrumReportServiceImpl implements ScrumReportService {
     private void appendIssuesByStatus(StringBuilder sb, List<IssueEntity> issues) {
         Map<String, List<IssueEntity>> byStatus = issues.stream()
                 .collect(Collectors.groupingBy(IssueEntity::getStatusCategory));
-        appendStatusSection(sb, byStatus.get("진행 중"), "진행 중 :hammer:");
-        appendStatusSection(sb, byStatus.get("해야 할 일"), "해야 할 일 :clipboard:");
-        appendStatusSection(sb, byStatus.get("완료"), "완료됨 :white_check_mark:");
+        appendStatusSection(sb, byStatus.get(StatusCategory.IN_PROGRESS), "진행 중 :hammer:");
+        appendStatusSection(sb, byStatus.get(StatusCategory.TODO), "해야 할 일 :clipboard:");
+        appendStatusSection(sb, byStatus.get(StatusCategory.DONE), "완료됨 :white_check_mark:");
 
         double completedSp = issues.stream()
-                .filter(i -> "완료".equals(i.getStatusCategory()))
+                .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0).sum();
         double totalSp = issues.stream()
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0).sum();

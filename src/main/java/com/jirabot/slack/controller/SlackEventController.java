@@ -7,24 +7,31 @@ import com.jirabot.slack.client.ThreadActionClassifier;
 import com.jirabot.slack.client.dto.IntentResult;
 import com.jirabot.slack.client.dto.ThreadActionResult;
 import com.jirabot.slack.config.AsyncConfig;
+import com.jirabot.slack.config.JiraProperties;
 import com.jirabot.slack.dto.IssueCreateCommand;
 import com.jirabot.slack.dto.SlackEventEnvelope;
 import com.jirabot.slack.dto.SlackEventInner;
 import com.jirabot.slack.entity.IssueEntity;
 import com.jirabot.slack.entity.IntentFailureEntity;
+import com.jirabot.slack.entity.StatusCategory;
 import com.jirabot.slack.repository.IntentFailureRepository;
 import com.jirabot.slack.repository.IssueRepository;
 import com.jirabot.slack.repository.UserMappingRepository;
+import com.jirabot.slack.service.BugQueryService;
 import com.jirabot.slack.service.IssueCreateService;
 import com.jirabot.slack.service.IssueSearchService;
 import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ReminderSubscriptionService;
 import com.jirabot.slack.service.ScrumReportService;
+import java.time.DateTimeException;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.regex.Matcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -55,8 +62,11 @@ public class SlackEventController {
               `@봇더지라 작업 Alice` — 특정 팀원의 작업 조회
               `@봇더지라 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
               `@봇더지라 검색 <키워드>` — 이슈 제목/설명으로 검색 (예: `@봇더지라 검색 preset`)
+              `@봇더지라 버그` — 최근 7일간 해결된 버그 조회
+              `@봇더지라 버그 2026.03.11` — 특정 날짜 이후 해결된 버그 조회
               `@봇더지라 리마인더 on` / `off` / `상태` — 평일 09:00 미해결 이슈 DM 알림 토글
               `@봇더지라 sync` — Jira 이슈를 로컬 DB에 동기화
+              `@봇더지라 통계` — 현재 스프린트 SP 통계 요약
               `@봇더지라 완료` — 이슈 스레드에서 → Jira 완료 처리
 
             *스레드 액션 (이슈 스레드에서 댓글로 사용):*
@@ -71,11 +81,18 @@ public class SlackEventController {
 
             이슈 등록 시 AI가 자동으로 분류(BUG/FEATURE/OTHER)하고 Story Point를 추정합니다.""";
 
+    // STUDY: 날짜 파싱용 정규식. yyyy.MM.dd, yyyy-MM-dd, yyyy/MM/dd 형식을 모두 지원.
+    private static final java.util.regex.Pattern DATE_PATTERN =
+            java.util.regex.Pattern.compile("(\\d{4})[.\\-/](\\d{1,2})[.\\-/](\\d{1,2})");
+    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+
     private final IssueCreateService issueCreateService;
     private final IssueSearchService issueSearchService;
     private final ScrumReportService scrumReportService;
+    private final BugQueryService bugQueryService;
     private final JiraSyncService jiraSyncService;
     private final JiraApiClient jiraApiClient;
+    private final JiraProperties jiraProps;
     private final IssueRepository issueRepository;
     private final IntentClassifier intentClassifier;
     private final ThreadActionClassifier threadActionClassifier;
@@ -90,8 +107,10 @@ public class SlackEventController {
     public SlackEventController(IssueCreateService issueCreateService,
                                 IssueSearchService issueSearchService,
                                 ScrumReportService scrumReportService,
+                                BugQueryService bugQueryService,
                                 JiraSyncService jiraSyncService,
                                 JiraApiClient jiraApiClient,
+                                JiraProperties jiraProps,
                                 IssueRepository issueRepository,
                                 IntentClassifier intentClassifier,
                                 ThreadActionClassifier threadActionClassifier,
@@ -105,8 +124,10 @@ public class SlackEventController {
         this.issueCreateService = issueCreateService;
         this.issueSearchService = issueSearchService;
         this.scrumReportService = scrumReportService;
+        this.bugQueryService = bugQueryService;
         this.jiraSyncService = jiraSyncService;
         this.jiraApiClient = jiraApiClient;
+        this.jiraProps = jiraProps;
         this.issueRepository = issueRepository;
         this.intentClassifier = intentClassifier;
         this.threadActionClassifier = threadActionClassifier;
@@ -153,6 +174,33 @@ public class SlackEventController {
             case "내작업", "my" -> { handleMyWork(event); return; }
             case "sync", "동기화" -> { handleSync(event); return; }
             case "완료", "done" -> { handleComplete(event); return; }
+            case "버그", "버그조회", "bug" -> {
+                // 날짜 없음 → 최근 7일
+                handleBugQuery(event, LocalDate.now(KST).minusDays(7));
+                return;
+            }
+            case "통계", "stats", "statistics" -> { handleStatistics(event); return; }
+        }
+        // STUDY: "버그 2026.03.11" 패턴 — 버그/bug 뒤에 날짜가 오면 해결된 버그 조회.
+        //        "버그 발생했어요" 같은 서술문은 날짜가 아니므로 Haiku로 fall through.
+        if ((lower.startsWith("버그 ") || lower.startsWith("bug ")) && cleaned.length() > 2) {
+            String afterKeyword = cleaned.substring(cleaned.indexOf(' ') + 1).strip();
+            Matcher dateMatcher = DATE_PATTERN.matcher(afterKeyword);
+            if (dateMatcher.matches()) {
+                try {
+                    LocalDate date = LocalDate.of(
+                            Integer.parseInt(dateMatcher.group(1)),
+                            Integer.parseInt(dateMatcher.group(2)),
+                            Integer.parseInt(dateMatcher.group(3)));
+                    handleBugQuery(event, date);
+                } catch (DateTimeException e) {
+                    // STUDY: 2026.13.40 같은 유효하지 않은 날짜 → 기본 7일 + 경고 메시지
+                    replyThread(event, ":warning: 날짜 형식이 올바르지 않아 최근 7일로 조회합니다.");
+                    handleBugQuery(event, LocalDate.now(KST).minusDays(7));
+                }
+                return;
+            }
+            // 날짜가 아닌 서술문 → Haiku fallback으로 넘김 (return 하지 않음)
         }
         if (lower.startsWith("작업 ") && cleaned.length() > 3) {
             handleMemberWork(event, cleaned.substring(3).strip());
@@ -347,7 +395,7 @@ public class SlackEventController {
                             });
                 }
                 case "statistics" ->
-                        replyThread(event, ":bar_chart: 통계 기능은 준비 중입니다. `@봇더지라 help`를 확인해주세요.");
+                        handleStatistics(event);
                 case "my_tasks" ->
                         handleMyWork(event);
                 case "skip" ->
@@ -363,6 +411,17 @@ public class SlackEventController {
         if (event.channel() != null && event.ts() != null) {
             slackNotifier.postThreadReply(event.channel(), event.ts(), message);
         }
+    }
+
+    // STUDY: 서비스로 분리된 버그 조회. 날짜 파싱은 routeCommand()에서 수행하고 LocalDate만 전달.
+    private void handleBugQuery(SlackEventInner event, LocalDate sinceDate) {
+        bugQueryService.queryResolvedBugs(sinceDate)
+                .thenAccept(result -> replyThread(event, result))
+                .exceptionally(ex -> {
+                    log.warn("Bug query failed: {}", ex.toString());
+                    replyThread(event, ":x: 버그 조회 중 오류가 발생했어요.");
+                    return null;
+                });
     }
 
     private void handleHelp(SlackEventInner event) {
@@ -435,15 +494,16 @@ public class SlackEventController {
             }
 
             IssueEntity issue = found.get();
-            if ("완료".equals(issue.getStatusCategory())) {
+            if (StatusCategory.DONE.equals(issue.getStatusCategory())) {
                 slackNotifier.postThreadReply(event.channel(), event.thread_ts(),
                         String.format("*%s*은 이미 완료 상태입니다.", issue.getIssueKey()));
                 return;
             }
 
-            boolean success = jiraApiClient.transitionIssue(issue.getIssueKey(), "완료");
+            boolean success = jiraApiClient.transitionIssue(issue.getIssueKey(), StatusCategory.DONE);
             if (success) {
-                issue.updateFrom(issue.getSummary(), issue.getIssueType(), "완료", "완료",
+                issue.updateFrom(issue.getSummary(), issue.getIssueType(),
+                        StatusCategory.DONE, StatusCategory.DONE,
                         issue.getAssignee(), issue.getStoryPoint(), java.time.Instant.now());
                 issueRepository.save(issue);
                 slackNotifier.postThreadReply(event.channel(), event.thread_ts(),
@@ -521,6 +581,18 @@ public class SlackEventController {
                 .exceptionally(ex -> {
                     log.warn("Member-work report failed for name={}: {}", memberName, ex.toString());
                     replyThread(event, ":x: 작업 조회 중 오류가 발생했어요.");
+                    return null;
+                });
+    }
+
+    // STUDY: 다른 핸들러와 동일하게 replyThread()로 스레드 응답. 채널에 긴 리포트가 올라가면 대화 흐름 방해.
+    private void handleStatistics(SlackEventInner event) {
+        log.info("Statistics report requested by user={}", event.user());
+        scrumReportService.generateStatisticsReport()
+                .thenAccept(report -> replyThread(event, report))
+                .exceptionally(ex -> {
+                    log.warn("Statistics report failed: {}", ex.toString());
+                    replyThread(event, ":x: 통계 리포트 생성 중 오류가 발생했어요.");
                     return null;
                 });
     }
