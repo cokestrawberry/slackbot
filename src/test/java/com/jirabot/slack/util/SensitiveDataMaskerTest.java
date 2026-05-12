@@ -29,7 +29,8 @@ class SensitiveDataMaskerTest {
     void maskSlackBotToken() {
         // STUDY: 실제 토큰 형태로 보이는 문자열은 GitHub push-protection이 차단하므로
         //        프리픽스와 일부 자리수만 유지하고 의도적으로 비-secret처럼 분리해서 만든다.
-        String fakeToken = "xoxb" + "-" + "TEST_NOT_A_REAL_TOKEN_VALUE_FOR_UNIT_TESTING";
+        //        SLACK_BOT_TOKEN regex가 [A-Za-z0-9-]만 허용하므로 underscore 없이 작성한다.
+        String fakeToken = "xoxb" + "-" + "NotARealTokenJustForTestingABCdef";
         assertThat(SensitiveDataMasker.mask(fakeToken)).isEqualTo("[slack-bot-token]");
     }
 
