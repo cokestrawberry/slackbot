@@ -20,6 +20,7 @@ import com.jirabot.slack.repository.IssueRepository;
 import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.IssueCreateResult;
 import com.jirabot.slack.service.IssueCreateService;
+import com.jirabot.slack.service.IssueSearchService;
 import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ScrumReportService;
 import java.util.Map;
@@ -34,6 +35,7 @@ import org.springframework.test.web.servlet.MockMvc;
 class SlackEventControllerTest {
 
     private IssueCreateService issueCreateService;
+    private IssueSearchService issueSearchService;
     private ScrumReportService scrumReportService;
     private JiraSyncService jiraSyncService;
     private JiraApiClient jiraApiClient;
@@ -43,11 +45,13 @@ class SlackEventControllerTest {
     private IntentFailureRepository intentFailureRepository;
     private UserMappingRepository userMappingRepository;
     private SlackNotifier slackNotifier;
+    private SlackEventController controller;
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         issueCreateService = mock(IssueCreateService.class);
+        issueSearchService = mock(IssueSearchService.class);
         scrumReportService = mock(ScrumReportService.class);
         jiraSyncService = mock(JiraSyncService.class);
         jiraApiClient = mock(JiraApiClient.class);
@@ -59,12 +63,13 @@ class SlackEventControllerTest {
         slackNotifier = mock(SlackNotifier.class);
         Executor directExecutor = Runnable::run;
         SlackEventDeduplicator deduplicator = new SlackEventDeduplicator();
-        mockMvc = standaloneSetup(new SlackEventController(
-                issueCreateService, scrumReportService, jiraSyncService,
+        controller = new SlackEventController(
+                issueCreateService, issueSearchService, scrumReportService, jiraSyncService,
                 jiraApiClient, issueRepository, intentClassifier,
                 threadActionClassifier, intentFailureRepository,
                 userMappingRepository, slackNotifier,
-                directExecutor, deduplicator, "C1,C2")).build();
+                directExecutor, deduplicator, "C1,C2");
+        mockMvc = standaloneSetup(controller).build();
     }
 
     @Test
@@ -181,6 +186,78 @@ class SlackEventControllerTest {
 
         verify(scrumReportService).generateMyReport("U1");
         verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void searchCommand_withKeyword_callsSearchService() throws Exception {
+        when(issueSearchService.searchByKeyword("로그인"))
+                .thenReturn(CompletableFuture.completedFuture(":mag: \"로그인\" 검색 결과 (1건)"));
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 검색 로그인","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(issueSearchService).searchByKeyword("로그인");
+        verify(slackNotifier).postThreadReply(any(), any(), any());
+    }
+
+    @Test
+    void searchCommand_withoutKeyword_sendsGuidance() throws Exception {
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 검색","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(issueRepository, never()).searchByKeyword(any(), any());
+        verify(slackNotifier).postThreadReply("C1", "1.0", ":mag: 검색어를 입력해주세요. 예: `@지라 검색 로그인`");
+    }
+
+    @Test
+    void searchCommand_english_callsSearchService() throws Exception {
+        when(issueSearchService.searchByKeyword("login"))
+                .thenReturn(CompletableFuture.completedFuture(":mag: \"login\" 검색 결과가 없습니다."));
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> search login","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(issueSearchService).searchByKeyword("login");
+    }
+
+    @Test
+    void semanticSearch_haiku_classifiesAsSearch_callsSearchService() throws Exception {
+        when(intentClassifier.classify(any()))
+                .thenReturn(new IntentResult("search", 0.90, Map.of("keyword", "로그인 에러"), "로그인 에러 관련 이슈 알려줘"));
+        when(issueSearchService.searchSemantic(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(":mag: \"로그인 에러 관련 이슈 알려줘\" 검색 결과 (1건)\n• SLAC-7"));
+
+        String body = """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> 로그인 에러 관련 이슈 알려줘","channel":"C1","ts":"1.0"}}
+                """;
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(issueSearchService).searchSemantic(any(), any());
+        verify(slackNotifier).postThreadReply(any(), any(), any());
     }
 
     @Test
