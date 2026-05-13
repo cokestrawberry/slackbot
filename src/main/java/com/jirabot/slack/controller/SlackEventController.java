@@ -430,6 +430,18 @@ public class SlackEventController {
         }
     }
 
+    // STUDY: 스레드에서 호출하면 스레드에 응답, 채널에서 호출하면 채널 메시지로 응답.
+    //        thread_ts가 있으면 이미 스레드 안이므로 스레드에 달고,
+    //        없으면 새 메시지로 채널에 보낸다.
+    private void reply(SlackEventInner event, String message) {
+        if (event.channel() == null) return;
+        if (event.thread_ts() != null) {
+            slackNotifier.postThreadReply(event.channel(), event.thread_ts(), message);
+        } else {
+            slackNotifier.postMessage(event.channel(), message);
+        }
+    }
+
     // STUDY: 서비스로 분리된 버그 조회. 날짜 파싱은 routeCommand()에서 수행하고 LocalDate만 전달.
     private void handleBugQuery(SlackEventInner event, LocalDate sinceDate) {
         bugQueryService.queryResolvedBugs(sinceDate)
@@ -447,14 +459,12 @@ public class SlackEventController {
         }
     }
 
+    // STUDY: 스레드에서 호출하면 스레드에 응답, 채널에서 호출하면 채널 메시지로 응답.
+    //        thread_ts가 있으면 스레드 내 댓글, 없으면 일반 메시지.
     private void handleScrum(SlackEventInner event) {
         log.info("Scrum report requested by user={}", event.user());
         scrumReportService.generateReport()
-                .thenAccept(report -> {
-                    if (event.channel() != null) {
-                        slackNotifier.postMessage(event.channel(), report);
-                    }
-                })
+                .thenAccept(report -> reply(event, report))
                 .exceptionally(ex -> {
                     log.warn("Scrum report failed: {}", ex.toString());
                     replyThread(event, ":x: 스크럼 리포트 생성 중 오류가 발생했어요.");
