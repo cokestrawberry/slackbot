@@ -151,7 +151,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
             int sprintId = (Integer) sprintRow[0];
             String sprintName = (String) sprintRow[1];
 
-            List<Object[]> statusStats = issueRepository.countAndSumGroupByStatusAndSprint(sprintId);
+            List<Object[]> statusStats = issueRepository.countAndSumGroupByStatusAndSprint(sprintId, subtaskTypeName);
             if (statusStats.isEmpty()) {
                 return CompletableFuture.completedFuture(
                         String.format("스프린트 '%s'에 이슈가 없습니다.", sprintName));
