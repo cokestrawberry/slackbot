@@ -368,11 +368,14 @@ public class ScrumReportServiceImpl implements ScrumReportService {
                 .collect(Collectors.groupingBy(
                         i -> i.getAssignee() != null ? i.getAssignee() : "미배정"));
 
-        // 담당자 전체 목록
+        // STUDY: 담당자 전체 목록. "미배정"은 항상 마지막에 표시.
         java.util.Set<String> allAssignees = new java.util.LinkedHashSet<>();
         recentlyUpdated.forEach(i -> allAssignees.add(
                 i.getAssignee() != null ? i.getAssignee() : "미배정"));
         allAssignees.addAll(todoByAssignee.keySet());
+        if (allAssignees.remove("미배정")) {
+            allAssignees.add("미배정");
+        }
 
         if (allAssignees.isEmpty()) {
             sb.append("변경된 이슈가 없습니다.\n");
