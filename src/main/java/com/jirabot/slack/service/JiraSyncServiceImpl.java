@@ -62,6 +62,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                         ji.assignee(), ji.storyPoint(),
                         parseInstant(ji.updated()));
                 entity.setParentKey(ji.parentKey());
+                entity.setSubtask(ji.subtask());
                 // STUDY: 동기화 시마다 스프린트 정보를 갱신. 이슈가 다른 스프린트로 이동하면 자동 반영.
                 entity.setSprint(sprint.id(), sprint.name());
                 updated++;
@@ -72,6 +73,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                         null, null,
                         parseInstant(ji.created()), parseInstant(ji.updated()));
                 entity.setParentKey(ji.parentKey());
+                entity.setSubtask(ji.subtask());
                 entity.setSprint(sprint.id(), sprint.name());
                 issueRepository.save(entity);
                 created++;
@@ -103,6 +105,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                         ji.assignee(), ji.storyPoint(),
                         parseInstant(ji.updated()));
                 entity.setParentKey(ji.parentKey());
+                entity.setSubtask(ji.subtask());
                 entity.clearSprint();
                 updated++;
             } else {
@@ -112,6 +115,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                         null, null,
                         parseInstant(ji.created()), parseInstant(ji.updated()));
                 entity.setParentKey(ji.parentKey());
+                entity.setSubtask(ji.subtask());
                 issueRepository.save(entity);
                 created++;
             }

@@ -64,6 +64,10 @@ public class IssueEntity {
     //        scrum 리포트의 hierarchical 표시에 사용 (subtask 를 parent 아래 들여쓰기).
     private String parentKey;
 
+    // STUDY: issuetype.subtask boolean. 타입명은 API/언어에 따라 "Sub-task"/"하위 작업" 등 달라지지만
+    //        이 값은 항상 일관적. SP 집계에서 subtask 제외 시 타입명 대신 이 필드를 사용.
+    private boolean subtask;
+
     protected IssueEntity() {}
 
     public IssueEntity(String issueKey, String summary, String issueType, String status,
@@ -159,4 +163,6 @@ public class IssueEntity {
     public Instant getSyncedAt() { return syncedAt; }
     public String getParentKey() { return parentKey; }
     public void setParentKey(String parentKey) { this.parentKey = parentKey; }
+    public boolean isSubtask() { return subtask; }
+    public void setSubtask(boolean subtask) { this.subtask = subtask; }
 }

@@ -481,11 +481,11 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         //        Jira UI 는 parent SP 만 카운트하고 subtask SP 는 parent 로 롤업되므로 별도로 더하면 중복.
         double completedSp = issues.stream()
                 .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
-                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
+                .filter(i -> !i.isSubtask())
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         double totalSp = issues.stream()
-                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
+                .filter(i -> !i.isSubtask())
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         sb.append(String.format(":bar_chart: *완료: %.0f SP / 전체: %.0f SP*", completedSp, totalSp));
