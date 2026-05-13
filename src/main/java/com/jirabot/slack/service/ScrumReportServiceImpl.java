@@ -358,64 +358,87 @@ public class ScrumReportServiceImpl implements ScrumReportService {
 
     private String formatReport(List<IssueEntity> issues) {
         StringBuilder sb = new StringBuilder();
-        LocalDate today = LocalDate.now(ZoneId.of("Asia/Seoul"));
-        LocalDate yesterday = today.minusDays(1);
-        Instant since = yesterday.atStartOfDay(ZoneId.of("Asia/Seoul")).toInstant();
+        ZoneId kst = ZoneId.of("Asia/Seoul");
+        LocalDate today = LocalDate.now(kst);
+        Instant yesterdayStart = today.minusDays(1).atStartOfDay(kst).toInstant();
 
         sb.append(":clipboard: *스프린트 리포트*\n\n");
 
-        // 어제~오늘 수정된 이슈 (진행한 업무)
-        List<IssueEntity> recentlyUpdated = issues.stream()
-                .filter(i -> i.getJiraUpdated() != null && !i.getJiraUpdated().isBefore(since))
-                .filter(i -> !StatusCategory.TODO.equals(i.getStatusCategory()))
-                .toList();
+        // STUDY: 담당자별로 그룹핑. 진행 중/해야 할 일 모든 이슈를 보여준다.
+        //        "어제 수정된 것만" 필터링하면 오래 진행 중인 이슈가 누락되므로 전체 표시.
+        Map<String, List<IssueEntity>> inProgressByAssignee = issues.stream()
+                .filter(i -> StatusCategory.IN_PROGRESS.equals(i.getStatusCategory()))
+                .collect(Collectors.groupingBy(
+                        i -> i.getAssignee() != null ? i.getAssignee() : "미배정"));
 
-        // 해야 할 일 (담당자별)
         Map<String, List<IssueEntity>> todoByAssignee = issues.stream()
                 .filter(i -> StatusCategory.TODO.equals(i.getStatusCategory()))
                 .collect(Collectors.groupingBy(
                         i -> i.getAssignee() != null ? i.getAssignee() : "미배정"));
 
-        // STUDY: 담당자 전체 목록. "미배정"은 항상 마지막에 표시.
+        // 담당자 전체 목록. "미배정"은 항상 마지막.
         java.util.Set<String> allAssignees = new java.util.LinkedHashSet<>();
-        recentlyUpdated.forEach(i -> allAssignees.add(
-                i.getAssignee() != null ? i.getAssignee() : "미배정"));
+        allAssignees.addAll(inProgressByAssignee.keySet());
         allAssignees.addAll(todoByAssignee.keySet());
         if (allAssignees.remove("미배정")) {
             allAssignees.add("미배정");
         }
 
         if (allAssignees.isEmpty()) {
-            sb.append("변경된 이슈가 없습니다.\n");
+            sb.append("진행 중이거나 해야 할 이슈가 없습니다.\n");
         } else {
             for (String assignee : allAssignees) {
                 sb.append(String.format(":bust_in_silhouette: *%s*\n", assignee));
 
-                List<IssueEntity> worked = recentlyUpdated.stream()
-                        .filter(i -> assignee.equals(
-                                i.getAssignee() != null ? i.getAssignee() : "미배정"))
-                        .toList();
-                if (!worked.isEmpty()) {
-                    Map<String, List<IssueEntity>> byStatus = worked.stream()
-                            .collect(Collectors.groupingBy(IssueEntity::getStatusCategory));
-                    appendStatusSection(sb, byStatus.get(StatusCategory.DONE), "완료됨 :white_check_mark:");
-                    appendStatusSection(sb, byStatus.get(StatusCategory.IN_PROGRESS), "진행 중 :hammer:");
+                // 진행 중 먼저
+                List<IssueEntity> inProgress = inProgressByAssignee.getOrDefault(assignee, List.of());
+                if (!inProgress.isEmpty()) {
+                    sb.append("  진행 중 :hammer:\n");
+                    for (IssueEntity i : inProgress) {
+                        sb.append(String.format("    • %s %s%s\n",
+                                issueLink(i.getIssueKey()), i.getSummary(), spText(i.getStoryPoint())));
+                    }
                 }
 
+                // 해야 할 일
                 List<IssueEntity> todo = todoByAssignee.getOrDefault(assignee, List.of());
                 if (!todo.isEmpty()) {
                     sb.append("  해야 할 일 :clipboard:\n");
                     for (IssueEntity i : todo) {
-                        String sp = spText(i.getStoryPoint());
                         sb.append(String.format("    • %s %s%s\n",
-                                issueLink(i.getIssueKey()), i.getSummary(), sp));
+                                issueLink(i.getIssueKey()), i.getSummary(), spText(i.getStoryPoint())));
                     }
                 }
                 sb.append("\n");
             }
         }
 
-        // SP 집계
+        // 어제 완료된 이슈
+        List<IssueEntity> yesterdayDone = issues.stream()
+                .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
+                .filter(i -> {
+                    Instant completed = effectiveCompletedAt(i);
+                    return completed != null && !completed.isBefore(yesterdayStart);
+                })
+                .toList();
+
+        if (!yesterdayDone.isEmpty()) {
+            double yesterdaySp = 0;
+            sb.append(":trophy: *어제 해결된 이슈*\n");
+            for (IssueEntity i : yesterdayDone) {
+                String assignee = i.getAssignee() != null ? i.getAssignee() : "미배정";
+                sb.append(String.format("  • %s %s%s (담당: %s)\n",
+                        issueLink(i.getIssueKey()), i.getSummary(),
+                        spText(i.getStoryPoint()), assignee));
+                yesterdaySp += i.getStoryPoint() != null ? i.getStoryPoint() : 0;
+            }
+            if (yesterdaySp > 0) {
+                sb.append(String.format("  → 어제 %.0f SP 완료!\n", yesterdaySp));
+            }
+            sb.append("\n");
+        }
+
+        // 전체 SP 집계
         double completedSp = issues.stream()
                 .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
@@ -423,7 +446,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         double totalSp = issues.stream()
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
-        sb.append(String.format("\n:bar_chart: *완료: %.0f SP / 전체: %.0f SP*", completedSp, totalSp));
+        sb.append(String.format(":bar_chart: *완료: %.0f SP / 전체: %.0f SP*", completedSp, totalSp));
 
         return sb.toString();
     }
