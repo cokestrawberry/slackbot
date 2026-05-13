@@ -209,8 +209,10 @@ public class JiraApiClientImpl implements JiraApiClient {
             String jql = "project=" + props.projectKey() + " AND sprint is EMPTY AND statusCategory != Done ORDER BY updated DESC";
             while (result.size() < maxBacklogIssues) {
                 final int offset = startAt;
+                // STUDY: Jira Cloud는 /rest/api/3/search를 deprecated → /rest/api/3/search/jql로 마이그레이션.
+                //        https://developer.atlassian.com/changelog/#CHANGE-2046
                 String json = jiraWebClient.get()
-                        .uri(uri -> uri.path("/rest/api/3/search")
+                        .uri(uri -> uri.path("/rest/api/3/search/jql")
                                 .queryParam("jql", jql)
                                 .queryParam("fields", sprintFields)
                                 .queryParam("maxResults", 50)
