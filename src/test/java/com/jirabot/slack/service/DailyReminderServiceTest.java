@@ -42,7 +42,7 @@ class DailyReminderServiceTest {
     private void rebuild(boolean enabled) {
         ReminderProperties reminderProps = new ReminderProperties(enabled, "0 0 9 * * *", "Asia/Seoul");
         JiraProperties jiraProps = new JiraProperties(
-                "https://cryptolab.atlassian.net", "u@x", "t", "ES2");
+                "https://cryptolab.atlassian.net", "u@x", "t", "ES2", null, null);
         service = new DailyReminderService(
                 userMappingRepository, issueRepository, slackNotifier, reminderProps, jiraProps);
     }

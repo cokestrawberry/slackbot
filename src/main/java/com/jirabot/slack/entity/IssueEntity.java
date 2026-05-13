@@ -77,7 +77,9 @@ public class IssueEntity {
         this.jiraCreated = jiraCreated;
         this.jiraUpdated = jiraUpdated;
         this.syncedAt = Instant.now();
-        this.completedAt = StatusCategory.DONE.equals(statusCategory) ? Instant.now() : null;
+        // STUDY: 동기화로 처음 DB에 들어오는 경우, Jira의 jiraUpdated를 completedAt으로 사용.
+        //        Instant.now()를 쓰면 "오늘 완료"로 잘못 집계된다.
+        this.completedAt = StatusCategory.DONE.equals(statusCategory) ? jiraUpdated : null;
     }
 
     public void updateFrom(String summary, String issueType, String status, String statusCategory,
@@ -91,9 +93,10 @@ public class IssueEntity {
         this.storyPoint = storyPoint;
         this.jiraUpdated = jiraUpdated;
         this.syncedAt = Instant.now();
-        // 완료로 전환된 시점만 기록. 이미 완료였으면 유지.
+        // STUDY: 완료로 전환된 시점 기록. 동기화로 발견한 경우 jiraUpdated를 사용해야
+        //        실제 완료 시점에 가깝다. Instant.now()를 쓰면 통계가 왜곡된다.
         if (StatusCategory.DONE.equals(statusCategory) && wasNotComplete) {
-            this.completedAt = Instant.now();
+            this.completedAt = jiraUpdated;
         } else if (!StatusCategory.DONE.equals(statusCategory)) {
             this.completedAt = null;
         }
@@ -101,11 +104,12 @@ public class IssueEntity {
 
     /**
      * 상태만 변경할 때 사용하는 간편 메서드.
-     * updateFrom()과 달리 summary, issueType 등 나머지 필드를 건드리지 않는다.
+     * STUDY: Jira의 status(예: "검토 중")와 statusCategory(예: "진행 중")는 다른 개념이다.
+     *        status는 워크플로 상태명, statusCategory는 3가지(해야 할 일/진행 중/완료) 중 하나.
      */
-    public void updateStatus(String statusCategory) {
+    public void updateStatus(String status, String statusCategory) {
         boolean wasNotComplete = !StatusCategory.DONE.equals(this.statusCategory);
-        this.status = statusCategory;
+        this.status = status;
         this.statusCategory = statusCategory;
         this.jiraUpdated = Instant.now();
         this.syncedAt = Instant.now();

@@ -23,13 +23,14 @@ import org.junit.jupiter.api.Test;
 class IssueSearchServiceImplTest {
 
     private JiraApiClient jiraApiClient;
+
     private IssueSearchServiceImpl service;
 
     @BeforeEach
     void setUp() {
         jiraApiClient = mock(JiraApiClient.class);
         JiraProperties props = new JiraProperties(
-                "https://cryptolab.atlassian.net/", "user@example.com", "token", "ES2");
+                "https://cryptolab.atlassian.net/", "user@example.com", "token", "ES2", null, null);
         service = new IssueSearchServiceImpl(jiraApiClient, props);
     }
 

@@ -55,7 +55,7 @@ class JiraWebhookServiceImplTest {
         JiraWebhookProperties props = new JiraWebhookProperties(true, "secret", trigger);
         NotifyProperties notify = new NotifyProperties(mentionMode, 0);
         JiraProperties jiraProps = new JiraProperties(
-                "https://cryptolab.atlassian.net", "u@x", "t", "ES2");
+                "https://cryptolab.atlassian.net", "u@x", "t", "ES2", null, null);
         service = new JiraWebhookServiceImpl(new ObjectMapper(), issueRepository,
                 userMappingRepository, processedRepo, slackNotifier, props, notify, jiraProps, resolver);
     }

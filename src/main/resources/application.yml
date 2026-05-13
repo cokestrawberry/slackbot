@@ -54,6 +54,12 @@ jira:
     secret: ${JIRA_WEBHOOK_SECRET:}
     # STATUS | STATUS_CATEGORY | DONE_ONLY | STATUS_AND_ASSIGNEE
     notify-on: ${JIRA_WEBHOOK_NOTIFY_ON:STATUS_AND_ASSIGNEE}
+  # STUDY: Story Point 커스텀 필드 ID. Jira 사이트마다 다르다 (관리자 > 커스텀 필드에서 확인).
+  story-point-field: ${JIRA_SP_FIELD:customfield_10036}
+  issue-types:
+    bug: ${JIRA_ISSUE_TYPE_BUG:Bug}
+    task: ${JIRA_ISSUE_TYPE_TASK:Task}
+    subtask: ${JIRA_ISSUE_TYPE_SUBTASK:Sub-task}
 
 # 봇 응답 메시지의 알림 정책.
 notify:

@@ -3,7 +3,6 @@ package com.jirabot.slack.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jirabot.slack.client.dto.IssueClassification;
-import com.jirabot.slack.client.dto.JiraCreateRequest;
 import com.jirabot.slack.client.dto.JiraCreateResponse;
 import com.jirabot.slack.client.dto.JiraSearchHit;
 import com.jirabot.slack.client.dto.SprintInfo;
@@ -28,9 +27,9 @@ public class JiraApiClientImpl implements JiraApiClient {
 
     private static final Logger log = LoggerFactory.getLogger(JiraApiClientImpl.class);
 
-    // STUDY: Jira Agile REST API의 보드 ID. application.yml에서 설정 가능하도록 확장 가능하지만
-    //        현재 SLAC 프로젝트 전용이므로 프로퍼티로 관리.
-    private static final String SPRINT_FIELDS = "summary,status,assignee,issuetype,customfield_10016,created,updated";
+    // STUDY: Jira Agile API에서 가져올 필드 목록. SP 커스텀 필드는 사이트마다 다르므로
+    //        JiraProperties에서 읽어 동적으로 구성한다.
+    private final String sprintFields;
 
     private final WebClient jiraWebClient;
     private final JiraProperties props;
@@ -40,6 +39,7 @@ public class JiraApiClientImpl implements JiraApiClient {
         this.jiraWebClient = jiraWebClient;
         this.props = props;
         this.objectMapper = objectMapper;
+        this.sprintFields = "summary,status,assignee,issuetype," + props.storyPointField() + ",created,updated";
     }
 
     @Override
@@ -49,7 +49,7 @@ public class JiraApiClientImpl implements JiraApiClient {
             backoff = @Backoff(delay = 500, multiplier = 2.0))
     public JiraCreateResponse createIssue(IssueClassification classification, String reporterName,
                                           String jiraAccountId) {
-        JiraCreateRequest request = buildRequest(classification, reporterName, jiraAccountId);
+        Map<String, Object> request = buildRequest(classification, reporterName, jiraAccountId);
         try {
             JiraCreateResponse resp = jiraWebClient.post()
                     .uri("/rest/api/3/issue")
@@ -76,27 +76,30 @@ public class JiraApiClientImpl implements JiraApiClient {
         }
     }
 
-    private JiraCreateRequest buildRequest(IssueClassification c, String reporterName,
-                                          String jiraAccountId) {
-        // Jira 사이트 언어가 한국어로 생성돼 이슈 타입 name 이 "버그"/"작업" 으로 저장됨.
-        // Team-managed 프로젝트 타입은 REST API 리네임 불가 → 매핑으로 처리.
-        String issueTypeName = c.type() == IssueClassification.IssueType.BUG ? "버그" : "작업";
+    // STUDY: SP 커스텀 필드 ID가 사이트마다 다르므로 @JsonProperty 고정이 불가.
+    //        Map으로 빌드하면 동적 필드명을 자유롭게 추가할 수 있다.
+    private Map<String, Object> buildRequest(IssueClassification c, String reporterName,
+                                             String jiraAccountId) {
+        String issueTypeName = c.type() == IssueClassification.IssueType.BUG
+                ? props.issueTypes().bug() : props.issueTypes().task();
         List<String> labels = List.of("slackbot", "origin-slack", "sp-" + c.storyPoint(),
                 "claude-" + c.type().name().toLowerCase());
 
+        Map<String, Object> fields = new java.util.HashMap<>(Map.of(
+                "project", Map.of("key", props.projectKey()),
+                "summary", c.title(),
+                "issuetype", Map.of("name", issueTypeName),
+                "description", buildAdfDescription(c, reporterName),
+                "labels", labels,
+                props.storyPointField(), (double) c.storyPoint()
+        ));
         // STUDY: reporter/assignee는 Jira accountId로 지정. null이면 API 토큰 소유자가 기본값.
-        JiraCreateRequest.AccountRef accountRef = jiraAccountId != null
-                ? new JiraCreateRequest.AccountRef(jiraAccountId) : null;
-
-        return new JiraCreateRequest(new JiraCreateRequest.Fields(
-                new JiraCreateRequest.ProjectRef(props.projectKey()),
-                c.title(),
-                new JiraCreateRequest.IssueTypeRef(issueTypeName),
-                buildAdfDescription(c, reporterName),
-                labels,
-                (double) c.storyPoint(),
-                accountRef,
-                accountRef));
+        if (jiraAccountId != null) {
+            Map<String, String> accountRef = Map.of("accountId", jiraAccountId);
+            fields.put("reporter", accountRef);
+            fields.put("assignee", accountRef);
+        }
+        return Map.of("fields", fields);
     }
 
     @Override
@@ -167,7 +170,7 @@ public class JiraApiClientImpl implements JiraApiClient {
                 final int offset = startAt;
                 String json = jiraWebClient.get()
                         .uri(uri -> uri.path("/rest/agile/1.0/sprint/{sprintId}/issue")
-                                .queryParam("fields", SPRINT_FIELDS)
+                                .queryParam("fields", sprintFields)
                                 .queryParam("maxResults", 50)
                                 .queryParam("startAt", offset)
                                 .build(sprintId))
@@ -187,6 +190,44 @@ public class JiraApiClientImpl implements JiraApiClient {
         return result;
     }
 
+    @Override
+    public List<SprintIssue> getBacklogIssues() {
+        // STUDY: JQL로 스프린트에 배정되지 않은 이슈를 조회.
+        //        "sprint is EMPTY"는 어떤 스프린트에도 포함되지 않은 이슈를 의미.
+        //        성숙한 프로젝트는 백로그가 수천 건일 수 있으므로 500건 상한을 둔다.
+        List<SprintIssue> result = new ArrayList<>();
+        int startAt = 0;
+        int maxBacklogIssues = 500;
+        try {
+            String jql = "project=" + props.projectKey() + " AND sprint is EMPTY AND statusCategory != Done ORDER BY updated DESC";
+            while (result.size() < maxBacklogIssues) {
+                final int offset = startAt;
+                // STUDY: Jira Cloud는 /rest/api/3/search를 deprecated → /rest/api/3/search/jql로 마이그레이션.
+                //        https://developer.atlassian.com/changelog/#CHANGE-2046
+                String json = jiraWebClient.get()
+                        .uri(uri -> uri.path("/rest/api/3/search/jql")
+                                .queryParam("jql", jql)
+                                .queryParam("fields", sprintFields)
+                                .queryParam("maxResults", 50)
+                                .queryParam("startAt", offset)
+                                .build())
+                        .retrieve().bodyToMono(String.class).block();
+                JsonNode root = objectMapper.readTree(json);
+                JsonNode issues = root.path("issues");
+                for (JsonNode issue : issues) {
+                    result.add(parseSprintIssue(issue));
+                }
+                int total = root.path("total").asInt();
+                startAt += issues.size();
+                if (startAt >= total) break;
+            }
+            log.info("Backlog issues fetched: {} issues", result.size());
+        } catch (Exception e) {
+            log.error("Failed to get backlog issues: {}", e.toString());
+        }
+        return result;
+    }
+
     private SprintIssue parseSprintIssue(JsonNode issue) {
         JsonNode f = issue.path("fields");
         JsonNode assignee = f.path("assignee");
@@ -197,7 +238,7 @@ public class JiraApiClientImpl implements JiraApiClient {
                 f.path("status").path("statusCategory").path("name").asText(),
                 assignee.isMissingNode() || assignee.isNull() ? null : assignee.path("displayName").asText(),
                 f.path("issuetype").path("name").asText(),
-                f.path("customfield_10016").asDouble(0),
+                f.path(props.storyPointField()).asDouble(0),
                 f.path("created").asText(""),
                 f.path("updated").asText(""));
     }
@@ -212,9 +253,12 @@ public class JiraApiClientImpl implements JiraApiClient {
                     .retrieve().bodyToMono(String.class).block();
             JsonNode transitions = objectMapper.readTree(json).path("transitions");
 
+            // STUDY: transition name은 프로젝트마다 다르지만 (예: "Start to Work", "진행 중"),
+            //        target status name은 프로젝트 내에서 일관적이다 (예: "진행 중").
+            //        t.to.name으로 매칭하면 transition 이름에 의존하지 않아 범용적.
             String transitionId = null;
             for (JsonNode t : transitions) {
-                if (targetStatusName.equals(t.path("name").asText())) {
+                if (targetStatusName.equals(t.path("to").path("name").asText())) {
                     transitionId = t.path("id").asText();
                     break;
                 }
@@ -242,14 +286,13 @@ public class JiraApiClientImpl implements JiraApiClient {
                                 String jiraAccountId) {
         try {
             // STUDY: Jira sub-task 생성은 parent 필드로 상위 이슈를 지정한다.
-            //        Team-managed 프로젝트의 하위 작업 타입은 "하위 작업" (한글).
-            //        reporter/assignee는 accountId로 지정. null이면 API 토큰 소유자가 기본값.
+            //        이슈 타입명은 사이트마다 다르므로 JiraProperties에서 읽는다.
             Map<String, Object> fields = new java.util.HashMap<>(Map.of(
                     "project", Map.of("key", props.projectKey()),
                     "parent", Map.of("key", parentKey),
                     "summary", summary,
-                    "issuetype", Map.of("name", "하위 작업"),
-                    "customfield_10016", (double) storyPoint
+                    "issuetype", Map.of("name", props.issueTypes().subtask()),
+                    props.storyPointField(), (double) storyPoint
             ));
             if (jiraAccountId != null) {
                 Map<String, String> accountRef = Map.of("accountId", jiraAccountId);
@@ -268,6 +311,28 @@ public class JiraApiClientImpl implements JiraApiClient {
         } catch (Exception e) {
             log.error("Failed to create sub-task for {}: {}", parentKey, e.toString());
             throw new JiraApiException("Sub-task creation failed: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public boolean moveToActiveSprint(String issueKey) {
+        try {
+            // STUDY: Jira Agile API로 이슈를 활성 스프린트에 추가.
+            //        POST /rest/agile/1.0/sprint/{sprintId}/issue에 이슈 키 목록 전달.
+            Optional<SprintInfo> sprint = getActiveSprint();
+            if (sprint.isEmpty()) {
+                log.warn("No active sprint to move {} into", issueKey);
+                return false;
+            }
+            jiraWebClient.post()
+                    .uri("/rest/agile/1.0/sprint/{sprintId}/issue", sprint.get().id())
+                    .bodyValue(Map.of("issues", List.of(issueKey)))
+                    .retrieve().bodyToMono(Void.class).block();
+            log.info("Issue {} moved to sprint '{}'", issueKey, sprint.get().name());
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to move {} to active sprint: {}", issueKey, e.toString());
+            return false;
         }
     }
 
