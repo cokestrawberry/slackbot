@@ -5,8 +5,12 @@ import com.jirabot.slack.client.JiraApiClient;
 import com.jirabot.slack.client.SlackNotifier;
 import com.jirabot.slack.config.AsyncConfig;
 import com.jirabot.slack.dto.SlackInteractionPayload;
+import com.jirabot.slack.filter.CachedBodyFilter;
 import com.jirabot.slack.repository.IssueRepository;
 import com.jirabot.slack.util.BlockKitBuilder;
+import jakarta.servlet.http.HttpServletRequest;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,7 +19,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 // STUDY: Slack interactive payloads arrive as application/x-www-form-urlencoded with a single
@@ -45,11 +48,13 @@ public class SlackInteractionController {
         this.slackExecutor = slackExecutor;
     }
 
-    // STUDY: consumes APPLICATION_FORM_URLENCODED_VALUE — Slack은 interaction payload를
-    //        form-encoded body의 "payload" 파라미터로 전송한다. Spring이 자동으로 form 파싱.
+    // STUDY: Slack interaction payload는 application/x-www-form-urlencoded의 "payload" 파라미터.
+    //        CachedBodyFilter가 HMAC 검증을 위해 body를 미리 읽으므로, Tomcat의 form 파라미터 파싱이
+    //        빈 body를 보게 된다. 따라서 @RequestParam 대신 cached raw body에서 직접 payload를 추출.
     @PostMapping(path = "/interaction", consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
-    public ResponseEntity<String> onInteraction(@RequestParam("payload") String payloadJson) {
+    public ResponseEntity<String> onInteraction(HttpServletRequest request) {
         try {
+            String payloadJson = extractPayloadFromBody(request);
             SlackInteractionPayload payload = objectMapper.readValue(payloadJson,
                     SlackInteractionPayload.class);
 
@@ -145,5 +150,27 @@ public class SlackInteractionController {
                         String.format(":x: *%s* 상태 변경 중 오류: %s", issueKey, e.getMessage()));
             }
         }
+    }
+
+    // STUDY: CachedBodyFilter가 body를 먼저 읽으므로 Tomcat의 form 파라미터 파싱이 동작하지 않는다.
+    //        cached raw body에서 "payload=" 접두사를 제거하고 URL 디코딩하여 JSON을 추출.
+    private String extractPayloadFromBody(HttpServletRequest request) {
+        Object cached = request.getAttribute(CachedBodyFilter.RAW_BODY_ATTRIBUTE);
+        String body;
+        if (cached instanceof byte[] bytes) {
+            body = new String(bytes, StandardCharsets.UTF_8);
+        } else {
+            try {
+                body = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to read request body", e);
+            }
+        }
+        // form body: "payload=URL_ENCODED_JSON"
+        String prefix = "payload=";
+        if (body.startsWith(prefix)) {
+            return URLDecoder.decode(body.substring(prefix.length()), StandardCharsets.UTF_8);
+        }
+        return body;
     }
 }

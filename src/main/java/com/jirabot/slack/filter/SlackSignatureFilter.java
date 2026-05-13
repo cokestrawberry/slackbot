@@ -89,6 +89,8 @@ public class SlackSignatureFilter extends OncePerRequestFilter {
         byte[] expectedBytes = expected.getBytes(StandardCharsets.UTF_8);
         byte[] providedBytes = signature.getBytes(StandardCharsets.UTF_8);
         if (!MessageDigest.isEqual(expectedBytes, providedBytes)) {
+            log.warn("slack signature mismatch: uri={} bodyLen={} expected={} provided={}",
+                    request.getRequestURI(), rawBody.length, expected, signature);
             reject(response, "slack signature mismatch");
             return;
         }

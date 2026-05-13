@@ -13,7 +13,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jirabot.slack.client.JiraApiClient;
 import com.jirabot.slack.client.SlackNotifier;
 import com.jirabot.slack.entity.IssueEntity;
+import com.jirabot.slack.filter.CachedBodyFilter;
 import com.jirabot.slack.repository.IssueRepository;
+import jakarta.servlet.http.HttpServletRequest;
+import java.nio.charset.StandardCharsets;
+import java.net.URLEncoder;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -39,6 +43,16 @@ class SlackInteractionControllerTest {
                 objectMapper, jiraApiClient, slackNotifier, issueRepository, directExecutor);
     }
 
+    // STUDY: CachedBodyFilter가 body를 먼저 읽으므로 @RequestParam이 동작하지 않아
+    //        HttpServletRequest에서 직접 payload를 추출한다. 테스트에서는 mock request를 사용.
+    private HttpServletRequest mockRequest(String payloadJson) {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        String formBody = "payload=" + URLEncoder.encode(payloadJson, StandardCharsets.UTF_8);
+        byte[] bodyBytes = formBody.getBytes(StandardCharsets.UTF_8);
+        when(request.getAttribute(CachedBodyFilter.RAW_BODY_ATTRIBUTE)).thenReturn(bodyBytes);
+        return request;
+    }
+
     @Test
     void inProgressTransition_updatesMessageAndDb() {
         String payload = """
@@ -60,7 +74,7 @@ class SlackInteractionControllerTest {
                 null, 3.0, "reporter", "desc", Instant.now(), Instant.now());
         when(issueRepository.findByIssueKey("PROJ-1")).thenReturn(Optional.of(issue));
 
-        ResponseEntity<String> response = controller.onInteraction(payload);
+        ResponseEntity<String> response = controller.onInteraction(mockRequest(payload));
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         verify(jiraApiClient).transitionIssue("PROJ-1", "진행 중");
@@ -89,7 +103,7 @@ class SlackInteractionControllerTest {
                 null, 5.0, "reporter", "desc", Instant.now(), Instant.now());
         when(issueRepository.findByIssueKey("PROJ-2")).thenReturn(Optional.of(issue));
 
-        ResponseEntity<String> response = controller.onInteraction(payload);
+        ResponseEntity<String> response = controller.onInteraction(mockRequest(payload));
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         verify(jiraApiClient).transitionIssue("PROJ-2", "완료");
@@ -117,17 +131,14 @@ class SlackInteractionControllerTest {
                 null, 2.0, "reporter", "desc", Instant.now(), Instant.now());
         when(issueRepository.findByIssueKey("PROJ-5")).thenReturn(Optional.of(issue));
 
-        controller.onInteraction(payload);
+        controller.onInteraction(mockRequest(payload));
 
-        // STUDY: ArgumentCaptor로 실제 전달된 blocks JSON을 캡처하여 구조를 검증.
         ArgumentCaptor<String> blocksCaptor = ArgumentCaptor.forClass(String.class);
         verify(slackNotifier).updateMessage(eq("C456"), eq("1234567890.123456"),
                 anyString(), blocksCaptor.capture());
 
         JsonNode updatedBlocks = objectMapper.readTree(blocksCaptor.getValue());
         assertThat(updatedBlocks.isArray()).isTrue();
-
-        // Original section + divider (actions removed) + result section = 3 blocks
         assertThat(updatedBlocks.size()).isEqualTo(3);
         assertThat(updatedBlocks.get(0).path("type").asText()).isEqualTo("section");
         assertThat(updatedBlocks.get(0).path("text").path("text").asText()).isEqualTo("Issue info here");
@@ -138,7 +149,6 @@ class SlackInteractionControllerTest {
         assertThat(resultText).contains("완료");
         assertThat(resultText).contains("testuser");
 
-        // Verify no actions block remains
         for (JsonNode block : updatedBlocks) {
             assertThat(block.path("type").asText()).isNotEqualTo("actions");
         }
@@ -158,7 +168,7 @@ class SlackInteractionControllerTest {
 
         when(jiraApiClient.transitionIssue("PROJ-3", "완료")).thenReturn(false);
 
-        ResponseEntity<String> response = controller.onInteraction(payload);
+        ResponseEntity<String> response = controller.onInteraction(mockRequest(payload));
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         verify(slackNotifier).postThreadReply(eq("C456"), eq("1234567890.123456"), anyString());
@@ -173,14 +183,18 @@ class SlackInteractionControllerTest {
                 }
                 """;
 
-        ResponseEntity<String> response = controller.onInteraction(payload);
+        ResponseEntity<String> response = controller.onInteraction(mockRequest(payload));
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
     }
 
     @Test
     void invalidPayload_returns200() {
-        ResponseEntity<String> response = controller.onInteraction("{invalid json");
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getAttribute(CachedBodyFilter.RAW_BODY_ATTRIBUTE))
+                .thenReturn("payload={invalid".getBytes(StandardCharsets.UTF_8));
+
+        ResponseEntity<String> response = controller.onInteraction(request);
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
     }
@@ -197,7 +211,7 @@ class SlackInteractionControllerTest {
                 }
                 """;
 
-        ResponseEntity<String> response = controller.onInteraction(payload);
+        ResponseEntity<String> response = controller.onInteraction(mockRequest(payload));
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
     }
