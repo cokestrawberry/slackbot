@@ -90,7 +90,7 @@ class ScrumReportStatisticsTest {
 
     @Test
     void emptySprintIssues_returnsMessage() throws ExecutionException, InterruptedException {
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(List.of());
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(List.of());
 
         String result = service.generateStatisticsReport().get();
 
@@ -109,7 +109,7 @@ class ScrumReportStatisticsTest {
                 new Object[]{StatusCategory.IN_PROGRESS, 1L, 3.0},
                 new Object[]{StatusCategory.TODO, 1L, 8.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
 
         IssueEntity completedIssue = createIssue("PROJ-1", "Complete task", StatusCategory.DONE, 5.0, "김영현", now, now);
         when(issueRepository.findCompletedSinceInSprint(eq(StatusCategory.DONE), any(Instant.class), eq(SPRINT_ID)))
@@ -161,7 +161,7 @@ class ScrumReportStatisticsTest {
                 new Object[]{StatusCategory.DONE, 1L, 0.0},
                 new Object[]{StatusCategory.TODO, 1L, 0.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
         setupEmptySprintQueries();
 
         String result = service.generateStatisticsReport().get();
@@ -179,7 +179,7 @@ class ScrumReportStatisticsTest {
                 new Object[]{StatusCategory.DONE, 1L, 3.0},
                 new Object[]{StatusCategory.TODO, 1L, 5.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
         when(issueRepository.findCompletedSinceInSprint(eq(StatusCategory.DONE), any(Instant.class), eq(SPRINT_ID)))
                 .thenReturn(List.of());
         when(issueRepository.findByStatusCategoryAndSprintId(StatusCategory.IN_PROGRESS, SPRINT_ID))
@@ -199,7 +199,7 @@ class ScrumReportStatisticsTest {
         List<Object[]> statusStats = Arrays.<Object[]>asList(
                 new Object[]{StatusCategory.DONE, 1L, 3.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
         Instant threeDaysAgo = Instant.now().minus(3, ChronoUnit.DAYS);
         when(issueRepository.findCompletedSinceInSprint(eq(StatusCategory.DONE), any(Instant.class), eq(SPRINT_ID)))
                 .thenReturn(List.of());
@@ -221,7 +221,7 @@ class ScrumReportStatisticsTest {
         List<Object[]> statusStats = Arrays.<Object[]>asList(
                 new Object[]{StatusCategory.IN_PROGRESS, 1L, 0.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
         when(issueRepository.findCompletedSinceInSprint(eq(StatusCategory.DONE), any(Instant.class), eq(SPRINT_ID)))
                 .thenReturn(List.of());
         IssueEntity issue = createIssueNullSp("PROJ-1", "No SP", StatusCategory.IN_PROGRESS, "A", Instant.now());
@@ -245,7 +245,7 @@ class ScrumReportStatisticsTest {
         List<Object[]> statusStats = Arrays.<Object[]>asList(
                 new Object[]{StatusCategory.DONE, 1L, 5.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
         when(issueRepository.findCompletedSinceInSprint(eq(StatusCategory.DONE), any(Instant.class), eq(SPRINT_ID)))
                 .thenReturn(List.of(doneIssue));
         when(issueRepository.findByStatusCategoryAndSprintId(StatusCategory.IN_PROGRESS, SPRINT_ID))
@@ -272,7 +272,7 @@ class ScrumReportStatisticsTest {
         List<Object[]> statusStats = Arrays.<Object[]>asList(
                 new Object[]{StatusCategory.DONE, 1L, 3.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
         when(issueRepository.findCompletedSinceInSprint(eq(StatusCategory.DONE), any(Instant.class), eq(SPRINT_ID)))
                 .thenReturn(List.of(issue));
         when(issueRepository.findByStatusCategoryAndSprintId(StatusCategory.IN_PROGRESS, SPRINT_ID))
@@ -296,7 +296,7 @@ class ScrumReportStatisticsTest {
         List<Object[]> statusStats = Arrays.<Object[]>asList(
                 new Object[]{StatusCategory.DONE, 1L, 3.0}
         );
-        when(issueRepository.countAndSumGroupByStatusAndSprint(eq(SPRINT_ID), any())).thenReturn(statusStats);
+        when(issueRepository.countAndSumGroupByStatusAndSprint(SPRINT_ID)).thenReturn(statusStats);
         when(issueRepository.findCompletedSinceInSprint(eq(StatusCategory.DONE), any(Instant.class), eq(SPRINT_ID)))
                 .thenReturn(List.of(issue));
         when(issueRepository.findByStatusCategoryAndSprintId(StatusCategory.IN_PROGRESS, SPRINT_ID))

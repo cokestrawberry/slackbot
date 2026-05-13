@@ -254,6 +254,7 @@ public class JiraApiClientImpl implements JiraApiClient {
                 f.path("status").path("statusCategory").path("name").asText(),
                 assignee.isMissingNode() || assignee.isNull() ? null : assignee.path("displayName").asText(),
                 f.path("issuetype").path("name").asText(),
+                f.path("issuetype").path("subtask").asBoolean(false),
                 f.path(props.storyPointField()).asDouble(0),
                 parentKey,
                 f.path("created").asText(""),

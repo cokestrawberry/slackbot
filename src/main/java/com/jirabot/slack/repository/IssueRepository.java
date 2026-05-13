@@ -75,12 +75,11 @@ public interface IssueRepository extends JpaRepository<IssueEntity, Long> {
     // --- 스프린트 필터 버전 ---
 
     // STUDY: 스프린트별 통계를 위한 집계 쿼리. subtask는 Jira UI와 동일하게 제외.
-    //        issueType 파라미터에 subtask 타입명(예: "Sub-task")을 전달.
+    //        issuetype.subtask boolean으로 판별 — 타입명은 API/언어마다 달라도 이 값은 일관적.
     @Query("SELECT i.statusCategory, COUNT(i), COALESCE(SUM(i.storyPoint), 0) " +
-           "FROM IssueEntity i WHERE i.sprintId = :sprintId AND i.issueType != :subtaskType " +
+           "FROM IssueEntity i WHERE i.sprintId = :sprintId AND i.subtask = false " +
            "GROUP BY i.statusCategory")
-    List<Object[]> countAndSumGroupByStatusAndSprint(@Param("sprintId") int sprintId,
-                                                     @Param("subtaskType") String subtaskType);
+    List<Object[]> countAndSumGroupByStatusAndSprint(@Param("sprintId") int sprintId);
 
     List<IssueEntity> findByStatusCategoryAndSprintId(String statusCategory, int sprintId);
 

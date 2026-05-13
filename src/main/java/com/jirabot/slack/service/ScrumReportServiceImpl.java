@@ -151,7 +151,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
             int sprintId = (Integer) sprintRow[0];
             String sprintName = (String) sprintRow[1];
 
-            List<Object[]> statusStats = issueRepository.countAndSumGroupByStatusAndSprint(sprintId, subtaskTypeName);
+            List<Object[]> statusStats = issueRepository.countAndSumGroupByStatusAndSprint(sprintId);
             if (statusStats.isEmpty()) {
                 return CompletableFuture.completedFuture(
                         String.format("스프린트 '%s'에 이슈가 없습니다.", sprintName));
@@ -463,11 +463,11 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         //        Jira UI 는 parent SP 만 카운트하고 subtask SP 는 parent 로 롤업되므로 별도로 더하면 중복.
         double completedSp = issues.stream()
                 .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
-                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
+                .filter(i -> !i.isSubtask())
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         double totalSp = issues.stream()
-                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
+                .filter(i -> !i.isSubtask())
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         sb.append(String.format(":bar_chart: *완료: %.0f SP / 전체: %.0f SP*", completedSp, totalSp));

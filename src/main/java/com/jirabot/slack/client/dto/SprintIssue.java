@@ -9,6 +9,7 @@ public record SprintIssue(
         String statusCategory,   // "해야 할 일", "진행 중", "완료"
         String assignee,         // displayName, null이면 미배정
         String issueType,        // "버그", "작업", "스토리" 등
+        boolean subtask,         // issuetype.subtask — 타입명이 언어마다 달라도 이 값은 일관적
         double storyPoint,       // 0이면 미설정
         String parentKey,        // 하위 작업이면 부모 이슈 키, 아니면 null
         String created,          // ISO datetime
