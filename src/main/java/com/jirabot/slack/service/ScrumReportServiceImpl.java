@@ -34,6 +34,9 @@ public class ScrumReportServiceImpl implements ScrumReportService {
     private final UserMappingRepository userMappingRepository;
     private final SlackNotifier slackNotifier;
     private final String jiraBaseUrl;
+    // STUDY: Jira UI 의 sprint SP 합계는 parent 만 카운트하고 subtask SP 는 parent 로 롤업된다.
+    //        봇 응답을 UI 와 일치시키기 위해 SP 집계에서 subtask 타입을 제외한다.
+    private final String subtaskTypeName;
 
     public ScrumReportServiceImpl(IssueRepository issueRepository,
                                   UserMappingRepository userMappingRepository,
@@ -44,6 +47,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         this.slackNotifier = slackNotifier;
         String base = jiraProps.baseUrl() == null ? "" : jiraProps.baseUrl();
         this.jiraBaseUrl = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
+        this.subtaskTypeName = jiraProps.issueTypes().subtask();
     }
 
     @Async("slackTaskExecutor")
@@ -350,6 +354,29 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         return sp != null && sp > 0 ? String.format("SP %.0f", sp) : "SP -";
     }
 
+    // STUDY: parent-subtask 구조를 시각적으로 보여준다. 같은 섹션 안에 부모가 있으면 그 아래에
+    //        subtask 를 `-` 들여쓰기로 묶고, 부모가 섹션 밖이거나 없으면 subtask 도 최상위로 출력.
+    private void appendHierarchical(StringBuilder sb, List<IssueEntity> items, String indent) {
+        Map<String, IssueEntity> byKey = items.stream()
+                .collect(Collectors.toMap(IssueEntity::getIssueKey, i -> i, (a, b) -> a));
+        for (IssueEntity i : items) {
+            String parentKey = i.getParentKey();
+            // 부모가 같은 섹션에 존재하는 subtask 는 부모 라인 아래에서 출력되므로 여기선 건너뜀.
+            if (parentKey != null && byKey.containsKey(parentKey)) {
+                continue;
+            }
+            sb.append(String.format("%s• %s %s%s\n",
+                    indent, issueLink(i.getIssueKey()), i.getSummary(), spText(i.getStoryPoint())));
+            for (IssueEntity child : items) {
+                if (i.getIssueKey().equals(child.getParentKey())) {
+                    sb.append(String.format("%s  - %s %s%s\n",
+                            indent, issueLink(child.getIssueKey()), child.getSummary(),
+                            spText(child.getStoryPoint())));
+                }
+            }
+        }
+    }
+
     private void appendStatusCountFromStats(StringBuilder sb, long[] stats, String label) {
         long count = stats != null ? stats[0] : 0;
         long sp = stats != null ? stats[1] : 0;
@@ -394,20 +421,14 @@ public class ScrumReportServiceImpl implements ScrumReportService {
                 List<IssueEntity> inProgress = inProgressByAssignee.getOrDefault(assignee, List.of());
                 if (!inProgress.isEmpty()) {
                     sb.append("  진행 중 :hammer:\n");
-                    for (IssueEntity i : inProgress) {
-                        sb.append(String.format("    • %s %s%s\n",
-                                issueLink(i.getIssueKey()), i.getSummary(), spText(i.getStoryPoint())));
-                    }
+                    appendHierarchical(sb, inProgress, "    ");
                 }
 
                 // 해야 할 일
                 List<IssueEntity> todo = todoByAssignee.getOrDefault(assignee, List.of());
                 if (!todo.isEmpty()) {
                     sb.append("  해야 할 일 :clipboard:\n");
-                    for (IssueEntity i : todo) {
-                        sb.append(String.format("    • %s %s%s\n",
-                                issueLink(i.getIssueKey()), i.getSummary(), spText(i.getStoryPoint())));
-                    }
+                    appendHierarchical(sb, todo, "    ");
                 }
                 sb.append("\n");
             }
@@ -438,12 +459,15 @@ public class ScrumReportServiceImpl implements ScrumReportService {
             sb.append("\n");
         }
 
-        // 전체 SP 집계
+        // STUDY: SP 집계 — subtask 는 제외해 Jira UI 의 sprint 합계와 동일하게 맞춘다.
+        //        Jira UI 는 parent SP 만 카운트하고 subtask SP 는 parent 로 롤업되므로 별도로 더하면 중복.
         double completedSp = issues.stream()
                 .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
+                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         double totalSp = issues.stream()
+                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         sb.append(String.format(":bar_chart: *완료: %.0f SP / 전체: %.0f SP*", completedSp, totalSp));
