@@ -99,4 +99,6 @@ public interface IssueRepository extends JpaRepository<IssueEntity, Long> {
            "WHERE i.sprintId IS NOT NULL GROUP BY i.sprintId, i.sprintName " +
            "ORDER BY MAX(i.syncedAt) DESC")
     List<Object[]> findLatestSprintInfo(Pageable pageable);
+
+    List<IssueEntity> findBySprintId(Integer sprintId);
 }

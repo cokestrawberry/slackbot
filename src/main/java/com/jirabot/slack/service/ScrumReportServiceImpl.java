@@ -50,12 +50,20 @@ public class ScrumReportServiceImpl implements ScrumReportService {
     @Override
     public CompletableFuture<String> generateReport() {
         try {
-            List<IssueEntity> allIssues = issueRepository.findAll();
-            if (allIssues.isEmpty()) {
-                return CompletableFuture.completedFuture("DB에 이슈가 없습니다. `@지라 sync`로 동기화해주세요.");
+            // STUDY: scrum 리포트는 현재 스프린트 이슈만 대상. backlog 이슈는 검색용으로만 동기화되므로 제외.
+            List<Object[]> sprintInfoList = issueRepository.findLatestSprintInfo(PageRequest.of(0, 1));
+            if (sprintInfoList.isEmpty()) {
+                return CompletableFuture.completedFuture(
+                        "스프린트 정보가 없습니다. `@지라 sync`로 동기화해주세요.");
             }
-            String report = formatReport(allIssues);
-            log.info("Scrum report generated from DB, issues={}", allIssues.size());
+            int sprintId = (Integer) sprintInfoList.get(0)[0];
+
+            List<IssueEntity> sprintIssues = issueRepository.findBySprintId(sprintId);
+            if (sprintIssues.isEmpty()) {
+                return CompletableFuture.completedFuture("스프린트에 이슈가 없습니다.");
+            }
+            String report = formatReport(sprintIssues);
+            log.info("Scrum report generated from DB, sprint={}, issues={}", sprintId, sprintIssues.size());
             return CompletableFuture.completedFuture(report);
         } catch (Exception e) {
             log.error("Scrum report generation failed: {}", e.toString());
