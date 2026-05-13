@@ -29,7 +29,7 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
     // Few-shot 은 직접 JSON 오브젝트로 교체 — 모델이 같은 형식을 모방하도록 유도.
     static final String SYSTEM_PROMPT = """
             You are a Jira triage assistant. Classify a short natural-language description into one of
-            {BUG, FEATURE, OTHER} and recommend a Story Point from the Fibonacci set {1, 2, 3, 5, 8}.
+            {BUG, FEATURE, OTHER} and recommend a Story Point from the Fibonacci set {1, 2, 3, 5, 8, 13}.
 
             Rules:
             - BUG: something is broken, behaves incorrectly, or throws errors.
