@@ -464,7 +464,7 @@ public class SlackEventController {
     private void handleScrum(SlackEventInner event) {
         log.info("Scrum report requested by user={}", event.user());
         scrumReportService.generateReport()
-                .thenAccept(report -> reply(event, report))
+                .thenAccept(reports -> reports.forEach(r -> reply(event, r)))
                 .exceptionally(ex -> {
                     log.warn("Scrum report failed: {}", ex.toString());
                     replyThread(event, ":x: 스크럼 리포트 생성 중 오류가 발생했어요.");

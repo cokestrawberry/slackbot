@@ -215,7 +215,7 @@ class SlackEventControllerTest {
     @Test
     void scrumCommand_dispatchesToScrumService() throws Exception {
         when(scrumReportService.generateReport())
-                .thenReturn(CompletableFuture.completedFuture("리포트"));
+                .thenReturn(CompletableFuture.completedFuture(java.util.List.of("리포트")));
         String body = """
                 {"type":"event_callback","event":{
                     "type":"app_mention","user":"U1","text":"<@U0BOT> scrum","channel":"C1","ts":"1.0"}}

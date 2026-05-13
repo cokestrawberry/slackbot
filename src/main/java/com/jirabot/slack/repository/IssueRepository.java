@@ -114,4 +114,6 @@ public interface IssueRepository extends JpaRepository<IssueEntity, Long> {
     @Modifying
     @Query("DELETE FROM IssueEntity i WHERE i.sprintId IS NULL AND i.issueKey NOT IN :keys")
     int deleteStaleBacklog(@Param("keys") Collection<String> keys);
+
+    List<IssueEntity> findBySprintId(Integer sprintId);
 }
