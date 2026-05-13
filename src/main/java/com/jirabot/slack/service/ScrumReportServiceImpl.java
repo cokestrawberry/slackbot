@@ -34,6 +34,9 @@ public class ScrumReportServiceImpl implements ScrumReportService {
     private final UserMappingRepository userMappingRepository;
     private final SlackNotifier slackNotifier;
     private final String jiraBaseUrl;
+    // STUDY: Jira UI 의 sprint SP 합계는 부모 이슈만 카운트하고 subtask SP 는 롤업된다.
+    //        봇 응답을 UI 와 일치시키기 위해 SP 집계에서 subtask 타입을 제외한다.
+    private final String subtaskTypeName;
 
     public ScrumReportServiceImpl(IssueRepository issueRepository,
                                   UserMappingRepository userMappingRepository,
@@ -44,6 +47,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         this.slackNotifier = slackNotifier;
         String base = jiraProps.baseUrl() == null ? "" : jiraProps.baseUrl();
         this.jiraBaseUrl = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
+        this.subtaskTypeName = jiraProps.issueTypes().subtask();
     }
 
     @Async("slackTaskExecutor")
@@ -54,9 +58,36 @@ public class ScrumReportServiceImpl implements ScrumReportService {
             if (allIssues.isEmpty()) {
                 return CompletableFuture.completedFuture("DB에 이슈가 없습니다. `@봇더지라 sync`로 동기화해주세요.");
             }
-            String report = formatReport(allIssues);
-            log.info("Scrum report generated from DB, issues={}", allIssues.size());
-            return CompletableFuture.completedFuture(report);
+
+            // STUDY: 활성 스프린트와 백로그를 분리해 별도 섹션으로 리포트한다.
+            //        과거 sprintId 가 박혀있는 이슈는 어느 쪽에도 포함되지 않는다 (의도적).
+            List<Object[]> sprintInfo = issueRepository.findLatestSprintInfo(PageRequest.of(0, 1));
+            Integer activeSprintId = sprintInfo.isEmpty() ? null : (Integer) sprintInfo.get(0)[0];
+            String activeSprintName = sprintInfo.isEmpty() ? null : (String) sprintInfo.get(0)[1];
+
+            List<IssueEntity> sprintIssues = activeSprintId == null ? List.of()
+                    : allIssues.stream()
+                            .filter(i -> activeSprintId.equals(i.getSprintId()))
+                            .toList();
+            List<IssueEntity> backlogIssues = allIssues.stream()
+                    .filter(i -> i.getSprintId() == null)
+                    .toList();
+
+            StringBuilder report = new StringBuilder();
+            if (!sprintIssues.isEmpty()) {
+                report.append(String.format(":clipboard: *스프린트 리포트 — '%s'*\n\n", activeSprintName));
+                report.append(formatScopeBody(sprintIssues));
+            }
+            if (!backlogIssues.isEmpty()) {
+                if (report.length() > 0) report.append("\n────────────────\n\n");
+                report.append(":clipboard: *백로그 리포트*\n\n");
+                report.append(formatScopeBody(backlogIssues));
+            }
+            if (report.length() == 0) {
+                return CompletableFuture.completedFuture("표시할 이슈가 없습니다.");
+            }
+            log.info("Scrum report generated sprint={} backlog={}", sprintIssues.size(), backlogIssues.size());
+            return CompletableFuture.completedFuture(report.toString());
         } catch (Exception e) {
             log.error("Scrum report generation failed: {}", e.toString());
             return CompletableFuture.completedFuture("스크럼 리포트 생성에 실패했습니다: " + e.getMessage());
@@ -348,13 +379,12 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         sb.append(String.format("  %s: %d건 (%d SP)\n", label, count, sp));
     }
 
-    private String formatReport(List<IssueEntity> issues) {
+    // STUDY: 헤더는 호출부에서 prepend. 같은 함수가 sprint/backlog 양쪽 body 를 생성한다.
+    private String formatScopeBody(List<IssueEntity> issues) {
         StringBuilder sb = new StringBuilder();
         LocalDate today = LocalDate.now(ZoneId.of("Asia/Seoul"));
         LocalDate yesterday = today.minusDays(1);
         Instant since = yesterday.atStartOfDay(ZoneId.of("Asia/Seoul")).toInstant();
-
-        sb.append(":clipboard: *스프린트 리포트*\n\n");
 
         // 어제~오늘 수정된 이슈 (진행한 업무)
         List<IssueEntity> recentlyUpdated = issues.stream()
@@ -407,12 +437,15 @@ public class ScrumReportServiceImpl implements ScrumReportService {
             }
         }
 
-        // SP 집계
+        // STUDY: SP 집계 — subtask 는 제외해 Jira UI 의 sprint 합계와 동일하게 맞춘다.
+        //        Jira UI 는 부모 SP 만 카운트하고 subtask SP 는 부모로 롤업되므로 별도로 더하면 중복.
         double completedSp = issues.stream()
                 .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
+                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         double totalSp = issues.stream()
+                .filter(i -> !subtaskTypeName.equals(i.getIssueType()))
                 .mapToDouble(i -> i.getStoryPoint() != null ? i.getStoryPoint() : 0)
                 .sum();
         sb.append(String.format("\n:bar_chart: *완료: %.0f SP / 전체: %.0f SP*", completedSp, totalSp));
