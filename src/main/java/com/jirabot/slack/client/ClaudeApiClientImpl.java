@@ -29,14 +29,16 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
     // Few-shot 은 직접 JSON 오브젝트로 교체 — 모델이 같은 형식을 모방하도록 유도.
     static final String SYSTEM_PROMPT = """
             You are a Jira triage assistant. Classify a short natural-language description into one of
-            {BUG, FEATURE, OTHER} and recommend a Story Point from the Fibonacci set {1, 2, 3, 5, 8}.
+            {BUG, FEATURE, OTHER} and recommend a Story Point from the Fibonacci set {1, 2, 3, 5, 8, 13}.
 
             Rules:
             - BUG: something is broken, behaves incorrectly, or throws errors.
             - FEATURE: a new capability, enhancement, or UX improvement is requested.
             - OTHER: docs, chores, questions, or anything that is not a bug or feature.
-            - Story points reflect effort + uncertainty. 1 = trivial, 2 = small, 3 = normal, 5 = medium
-              with some unknowns, 8 = large or cross-cutting.
+            - Story points reflect effort + uncertainty:
+              1 = 반나절 이하 (small), 2 = 하루 (medium), 3 = 1~2일 (large),
+              5 = 2~3일 (X-large), 8 = 3~4일 (warning — 분할 검토 필요),
+              13 = 너무 큼 (에픽급 — 반드시 분할 필요).
             - title: <= 120 Korean/English characters, imperative mood.
             - summary: 1-2 concise paragraphs summarizing the problem/request.
             - An INTENT HINT may be provided above the user input.
