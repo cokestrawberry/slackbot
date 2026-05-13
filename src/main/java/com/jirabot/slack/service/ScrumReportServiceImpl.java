@@ -34,7 +34,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
     private final UserMappingRepository userMappingRepository;
     private final SlackNotifier slackNotifier;
     private final String jiraBaseUrl;
-    // STUDY: Jira UI 의 sprint SP 합계는 부모 이슈만 카운트하고 subtask SP 는 롤업된다.
+    // STUDY: Jira UI 의 sprint SP 합계는 parent 만 카운트하고 subtask SP 는 parent 로 롤업된다.
     //        봇 응답을 UI 와 일치시키기 위해 SP 집계에서 subtask 타입을 제외한다.
     private final String subtaskTypeName;
 
@@ -478,7 +478,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
         }
 
         // STUDY: SP 집계 — subtask 는 제외해 Jira UI 의 sprint 합계와 동일하게 맞춘다.
-        //        Jira UI 는 부모 SP 만 카운트하고 subtask SP 는 부모로 롤업되므로 별도로 더하면 중복.
+        //        Jira UI 는 parent SP 만 카운트하고 subtask SP 는 parent 로 롤업되므로 별도로 더하면 중복.
         double completedSp = issues.stream()
                 .filter(i -> StatusCategory.DONE.equals(i.getStatusCategory()))
                 .filter(i -> !subtaskTypeName.equals(i.getIssueType()))

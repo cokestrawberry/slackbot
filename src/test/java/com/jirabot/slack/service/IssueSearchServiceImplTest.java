@@ -1,42 +1,58 @@
 package com.jirabot.slack.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-import com.jirabot.slack.client.JiraApiClient;
-import com.jirabot.slack.client.dto.JiraSearchHit;
+import com.jirabot.slack.client.ClaudeApiClient;
 import com.jirabot.slack.config.JiraProperties;
-import java.util.ArrayList;
+import com.jirabot.slack.entity.IssueEntity;
+import com.jirabot.slack.repository.IssueRepository;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-// STUDY: 최상위 5개·번호 목록·총 개수 미노출 정책을 검증한다.
-//        결과가 정확히 5개일 때만 "(이하 생략)" 가 추가되어야 한다.
 class IssueSearchServiceImplTest {
 
-    private JiraApiClient jiraApiClient;
+    private final IssueRepository issueRepository = mock(IssueRepository.class);
+    private final ClaudeApiClient claudeApiClient = mock(ClaudeApiClient.class);
+    private final JiraSyncService jiraSyncService = mock(JiraSyncService.class);
+    private final JiraProperties jiraProps =
+            new JiraProperties("https://jira.example.com", "test@example.com", "token", "SLAC", null, null);
 
     private IssueSearchServiceImpl service;
 
     @BeforeEach
     void setUp() {
-        jiraApiClient = mock(JiraApiClient.class);
-        JiraProperties props = new JiraProperties(
-                "https://cryptolab.atlassian.net/", "user@example.com", "token", "ES2", null, null);
-        service = new IssueSearchServiceImpl(jiraApiClient, props);
+        service = new IssueSearchServiceImpl(issueRepository, claudeApiClient, jiraSyncService, jiraProps);
     }
 
     @Test
-    void searchByKeyword_emptyResult_showsNoMatchMessage() throws Exception {
-        when(jiraApiClient.searchByText(eq("없는키워드"), anyInt())).thenReturn(List.of());
+    void searchByKeyword_returnsFormattedResults() throws ExecutionException, InterruptedException {
+        IssueEntity issue = new IssueEntity("SLAC-7", "로그인 에러", "Bug", "진행 중", "진행 중",
+                "김영현", 3.0, "reporter", null, Instant.now(), Instant.now());
+        when(issueRepository.searchByKeyword(eq("로그인"), any())).thenReturn(List.of(issue));
+
+        String result = service.searchByKeyword("로그인").get();
+
+        assertThat(result)
+                .contains(":mag: \"로그인\" 검색 결과 (1건)")
+                .contains("SLAC-7")
+                .contains("로그인 에러")
+                .contains("담당: 김영현");
+        verify(issueRepository).searchByKeyword(eq("로그인"), any());
+    }
+
+    @Test
+    void searchByKeyword_emptyResults_showsEmptyMessage() throws ExecutionException, InterruptedException {
+        when(issueRepository.searchByKeyword(eq("없는키워드"), any())).thenReturn(Collections.emptyList());
 
         String result = service.searchByKeyword("없는키워드").get();
 
@@ -44,115 +60,124 @@ class IssueSearchServiceImplTest {
     }
 
     @Test
-    void searchByKeyword_singleHit_numberedAndNoEllipsis() throws Exception {
-        when(jiraApiClient.searchByText(eq("로그인"), anyInt())).thenReturn(List.of(
-                new JiraSearchHit("ES2-100", "로그인 페이지 500 에러", "진행 중", "Alice")));
-
-        String result = service.searchByKeyword("로그인").get();
-
-        assertThat(result)
-                .contains(":mag: 검색결과 최상위 5개입니다:")
-                .contains("1. <https://cryptolab.atlassian.net/browse/ES2-100|ES2-100>")
-                .contains("로그인 페이지 500 에러")
-                .contains("진행 중")
-                .contains("담당: Alice")
-                .doesNotContain("(이하 생략)")
-                // 총 건수는 노출 안 함
-                .doesNotContain("(1건)")
-                .doesNotContain("(5건)");
-    }
-
-    @Test
-    void searchByKeyword_unassignedHit_showsMissingAssigneeFallback() throws Exception {
-        when(jiraApiClient.searchByText(eq("결제"), anyInt())).thenReturn(List.of(
-                new JiraSearchHit("ES2-200", "결제 0원 표시", "해야 할 일", null)));
-
-        String result = service.searchByKeyword("결제").get();
-
-        assertThat(result).contains("담당: 미배정");
-    }
-
-    @Test
-    void searchByKeyword_fiveHits_appendsEllipsisLine() throws Exception {
-        List<JiraSearchHit> five = new ArrayList<>();
-        for (int i = 1; i <= 5; i++) {
-            five.add(new JiraSearchHit("ES2-" + i, "이슈 " + i, "진행 중", "담당자"));
-        }
-        when(jiraApiClient.searchByText(eq("이슈"), anyInt())).thenReturn(five);
+    void searchByKeyword_displaysMaxAndOverflow() throws ExecutionException, InterruptedException {
+        // STUDY: Pageable로 DB 레벨에서 50건 제한. 여기서는 DB가 반환한 결과의 포맷팅을 검증.
+        List<IssueEntity> manyIssues = java.util.stream.IntStream.rangeClosed(1, 15)
+                .mapToObj(i -> new IssueEntity("SLAC-" + i, "이슈 " + i, "Bug", "진행 중", "진행 중",
+                        "담당자", 1.0, "reporter", null, Instant.now(), Instant.now()))
+                .toList();
+        when(issueRepository.searchByKeyword(eq("이슈"), any())).thenReturn(manyIssues);
 
         String result = service.searchByKeyword("이슈").get();
 
+        // 15건 반환, 10건 표시, 나머지 5건 overflow
         assertThat(result)
-                .contains(":mag: 검색결과 최상위 5개입니다:")
-                .contains("1. ").contains("2. ").contains("3. ").contains("4. ").contains("5. ")
-                .contains("(이하 생략)")
-                .doesNotContain("6. ");
+                .contains(":mag: \"이슈\" 검색 결과 (15건)")
+                .contains("외 5건이 더 있습니다.");
     }
 
     @Test
-    void searchByKeyword_threeHits_noEllipsisLine() throws Exception {
-        List<JiraSearchHit> three = List.of(
-                new JiraSearchHit("ES2-1", "이슈 1", "진행 중", "담당자"),
-                new JiraSearchHit("ES2-2", "이슈 2", "진행 중", "담당자"),
-                new JiraSearchHit("ES2-3", "이슈 3", "진행 중", "담당자"));
-        when(jiraApiClient.searchByText(eq("이슈"), anyInt())).thenReturn(three);
+    void searchSemantic_sonnetReturnsResults() throws ExecutionException, InterruptedException {
+        IssueEntity issue1 = new IssueEntity("SLAC-7", "로그인 500 에러", "Bug", "진행 중", "진행 중",
+                "김영현", 3.0, "reporter", "로그인 페이지에서 500 에러", Instant.now(), Instant.now());
+        IssueEntity issue2 = new IssueEntity("SLAC-8", "결제 금액 표시", "Bug", "완료", "완료",
+                "최아록", 2.0, "reporter", null, Instant.now(), Instant.now());
 
-        String result = service.searchByKeyword("이슈").get();
+        when(issueRepository.findAll()).thenReturn(List.of(issue1, issue2));
+        when(claudeApiClient.searchIssues(any(), any())).thenReturn(List.of("SLAC-7"));
 
+        String result = service.searchSemantic("로그인 에러 알려줘", "로그인").get();
+
+        assertThat(result).contains("SLAC-7").contains("로그인 500 에러");
+        verify(claudeApiClient).searchIssues(any(), any());
+    }
+
+    @Test
+    void searchSemantic_sonnetEmpty_fallsBackToKeyword() throws ExecutionException, InterruptedException {
+        IssueEntity issue = new IssueEntity("SLAC-7", "로그인 에러", "Bug", "진행 중", "진행 중",
+                "김영현", 3.0, "reporter", null, Instant.now(), Instant.now());
+
+        when(issueRepository.findAll()).thenReturn(List.of(issue));
+        when(claudeApiClient.searchIssues(any(), any())).thenReturn(Collections.emptyList());
+        when(issueRepository.searchByKeyword(eq("로그인"), any())).thenReturn(List.of(issue));
+
+        String result = service.searchSemantic("로그인 관련 이슈", "로그인").get();
+
+        assertThat(result).contains("SLAC-7");
+        verify(issueRepository).searchByKeyword(eq("로그인"), any());
+    }
+
+    @Test
+    void searchSemantic_sonnetThrows_fallsBackToKeyword() throws ExecutionException, InterruptedException {
+        IssueEntity issue = new IssueEntity("SLAC-7", "로그인 에러", "Bug", "진행 중", "진행 중",
+                "김영현", 3.0, "reporter", null, Instant.now(), Instant.now());
+
+        when(issueRepository.findAll()).thenReturn(List.of(issue));
+        when(claudeApiClient.searchIssues(any(), any())).thenThrow(new RuntimeException("Sonnet timeout"));
+        when(issueRepository.searchByKeyword(eq("로그인"), any())).thenReturn(List.of(issue));
+
+        String result = service.searchSemantic("로그인 관련 이슈", "로그인").get();
+
+        assertThat(result).contains("SLAC-7");
+        verify(issueRepository).searchByKeyword(eq("로그인"), any());
+    }
+
+    @Test
+    void searchSemantic_noIssuesInDb_showsSyncMessage() throws ExecutionException, InterruptedException {
+        when(issueRepository.findAll()).thenReturn(Collections.emptyList());
+
+        String result = service.searchSemantic("로그인", "로그인").get();
+
+        assertThat(result).contains("sync");
+        verify(claudeApiClient, never()).searchIssues(any(), any());
+    }
+
+    @Test
+    void escapeWildcards_escapesSpecialCharacters() {
+        assertThat(service.escapeWildcards("test")).isEqualTo("test");
+        assertThat(service.escapeWildcards("100%")).isEqualTo("100\\%");
+        assertThat(service.escapeWildcards("a_b")).isEqualTo("a\\_b");
+        assertThat(service.escapeWildcards("a\\b")).isEqualTo("a\\\\b");
+        assertThat(service.escapeWildcards("100%_test\\")).isEqualTo("100\\%\\_test\\\\");
+    }
+
+    @Test
+    void formatSearchResults_noResults_showsEmptyMessage() {
+        String result = service.formatSearchResults("테스트", Collections.emptyList());
+        assertThat(result).isEqualTo(":mag: \"테스트\" 검색 결과가 없습니다.");
+    }
+
+    @Test
+    void formatSearchResults_withResults_showsFormattedList() {
+        List<IssueEntity> issues = List.of(
+                new IssueEntity("SLAC-7", "로그인 에러", "Bug", "진행 중", "진행 중",
+                        "김영현", 3.0, "reporter", null, Instant.now(), Instant.now()),
+                new IssueEntity("SLAC-8", "로그인 UI 개선", "Story", "할 일", "할 일",
+                        null, null, "reporter", null, Instant.now(), Instant.now()));
+
+        String result = service.formatSearchResults("로그인", issues);
         assertThat(result)
-                .contains("1. ").contains("2. ").contains("3. ")
-                .doesNotContain("4. ")
-                .doesNotContain("(이하 생략)");
+                .contains(":mag: \"로그인\" 검색 결과 (2건)")
+                .contains("<https://jira.example.com/browse/SLAC-7|SLAC-7>")
+                .contains("담당: 김영현")
+                .contains("SP 3")
+                .contains("<https://jira.example.com/browse/SLAC-8|SLAC-8>")
+                .contains("담당: 미배정")
+                .contains("SP -");
     }
 
     @Test
-    void searchByKeyword_requestsAtMostFiveFromJira() throws Exception {
-        when(jiraApiClient.searchByText(eq("k"), eq(IssueSearchServiceImpl.MAX_SEARCH_RESULTS)))
-                .thenReturn(List.of());
+    void formatSearchResults_moreThanMax_showsOverflowMessage() {
+        List<IssueEntity> issues = java.util.stream.IntStream.rangeClosed(1, 12)
+                .mapToObj(i -> new IssueEntity("SLAC-" + i, "이슈 " + i, "Bug", "진행 중", "진행 중",
+                        "담당자", 1.0, "reporter", null, Instant.now(), Instant.now()))
+                .toList();
 
-        service.searchByKeyword("k").get();
-
-        verify(jiraApiClient).searchByText(eq("k"), eq(5));
-    }
-
-    @Test
-    void searchSemantic_hitsFromNaturalQuery_returnsFormattedResult() throws Exception {
-        when(jiraApiClient.searchByText(eq("결제 관련 이슈 보여줘"), anyInt())).thenReturn(List.of(
-                new JiraSearchHit("ES2-300", "결제 금액 표시 오류", "진행 중", "담당자")));
-
-        String result = service.searchSemantic("결제 관련 이슈 보여줘", "결제").get();
-
-        assertThat(result).contains("ES2-300").contains("결제 금액 표시 오류");
-        verify(jiraApiClient, times(1)).searchByText(eq("결제 관련 이슈 보여줘"), anyInt());
-        verifyNoMoreInteractions(jiraApiClient);
-    }
-
-    @Test
-    void searchSemantic_zeroHits_retriesWithFallbackKeyword() throws Exception {
-        when(jiraApiClient.searchByText(eq("애매한 자연어 질의 여러개 단어"), anyInt())).thenReturn(List.of());
-        when(jiraApiClient.searchByText(eq("결제"), anyInt())).thenReturn(List.of(
-                new JiraSearchHit("ES2-301", "결제 모듈 리팩터", "해야 할 일", null)));
-
-        String result = service.searchSemantic("애매한 자연어 질의 여러개 단어", "결제").get();
-
-        assertThat(result).contains("ES2-301").contains("결제 모듈 리팩터");
-        verify(jiraApiClient).searchByText(eq("애매한 자연어 질의 여러개 단어"), anyInt());
-        verify(jiraApiClient).searchByText(eq("결제"), anyInt());
-    }
-
-    @Test
-    void searchSemantic_zeroHits_andFallbackEqualsQuery_doesNotRetry() throws Exception {
-        when(jiraApiClient.searchByText(eq("결제"), anyInt())).thenReturn(List.of());
-
-        String result = service.searchSemantic("결제", "결제").get();
-
-        assertThat(result).isEqualTo(":mag: \"결제\" 검색 결과가 없습니다.");
-        verify(jiraApiClient, times(1)).searchByText(eq("결제"), anyInt());
-    }
-
-    @Test
-    void formatHits_empty_returnsConsistentMessage() {
-        assertThat(service.formatHits("foo", Collections.emptyList()))
-                .isEqualTo(":mag: \"foo\" 검색 결과가 없습니다.");
+        String result = service.formatSearchResults("이슈", issues);
+        assertThat(result)
+                .contains(":mag: \"이슈\" 검색 결과 (12건)")
+                .contains("외 2건이 더 있습니다.")
+                .doesNotContain("SLAC-11")
+                .doesNotContain("SLAC-12");
     }
 }

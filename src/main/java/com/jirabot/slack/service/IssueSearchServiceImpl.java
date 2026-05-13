@@ -1,89 +1,155 @@
 package com.jirabot.slack.service;
 
-import com.jirabot.slack.client.JiraApiClient;
-import com.jirabot.slack.client.dto.JiraSearchHit;
+import com.jirabot.slack.client.ClaudeApiClient;
+import com.jirabot.slack.client.dto.IssueSearchEntry;
 import com.jirabot.slack.config.JiraProperties;
+import com.jirabot.slack.entity.IssueEntity;
+import com.jirabot.slack.repository.IssueRepository;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
-// STUDY: 검색을 Jira REST API 에 직접 위임한다 (DB 사전 동기화 불필요).
-//        searchByKeyword / searchSemantic 모두 동일한 JiraApiClient.searchByText 를 호출하므로,
-//        Jira UI 의 Advanced Search 와 동일한 결과 범위를 갖는다.
-//        의미 검색(searchSemantic) 의 자연어 query 는 Jira 의 text ~ 풀텍스트 매칭에 그대로 위임.
-//        향후 자연어 → JQL 변환 단계가 필요해지면 이 클래스 안에서 Sonnet 호출을 추가하면 된다.
-//
-//        결과 노출 정책: 항상 최상위 5개만 가져와 번호 목록으로 표시한다. 총 개수는 노출하지 않는다.
-//        결과가 5개일 때만 더 있을 가능성을 알리는 "(이하 생략)" 라인을 덧붙인다.
+// STUDY: @Async("slackTaskExecutor") 패턴으로 비동기 실행. 컨트롤러는 CompletableFuture.thenAccept()로 결과만 받는다.
+//        ScrumReportServiceImpl과 동일한 패턴.
 @Service
 public class IssueSearchServiceImpl implements IssueSearchService {
 
     private static final Logger log = LoggerFactory.getLogger(IssueSearchServiceImpl.class);
 
-    static final int MAX_SEARCH_RESULTS = 5;
+    // STUDY: DB에서 가져올 최대 결과 수. 포맷팅에서는 10개만 보여주지만, DB 쿼리 부하를 제한하기 위해 50개로 제한.
+    static final int MAX_SEARCH_RESULTS = 50;
+    private static final int SEARCH_MAX_DISPLAY = 10;
 
-    private final JiraApiClient jiraApiClient;
+    private final IssueRepository issueRepository;
+    private final ClaudeApiClient claudeApiClient;
+    private final JiraSyncService jiraSyncService;
     private final String jiraBaseUrl;
 
-    public IssueSearchServiceImpl(JiraApiClient jiraApiClient,
+    public IssueSearchServiceImpl(IssueRepository issueRepository,
+                                  ClaudeApiClient claudeApiClient,
+                                  JiraSyncService jiraSyncService,
                                   JiraProperties jiraProps) {
-        this.jiraApiClient = jiraApiClient;
+        this.issueRepository = issueRepository;
+        this.claudeApiClient = claudeApiClient;
+        this.jiraSyncService = jiraSyncService;
         String base = jiraProps.baseUrl() == null ? "" : jiraProps.baseUrl();
         this.jiraBaseUrl = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
     }
 
+    // STUDY: 검색 freshness 를 위해 sync 를 먼저 돌린다. 매 호출 2~3s 지연이 추가되지만 사용자가
+    //        Jira 에서 방금 만든 이슈/변경된 상태도 결과에 반영됨. sync 실패는 검색을 막지 않는다
+    //        (있는 로컬 데이터로라도 응답).
+    private void prefetchFromJira() {
+        try {
+            jiraSyncService.syncActiveSprint();
+            jiraSyncService.syncBacklog();
+        } catch (Exception e) {
+            log.warn("Pre-search sync failed, proceeding with current DB state: {}", e.toString());
+        }
+    }
+
+    // STUDY: @Async 메서드는 Spring 프록시를 통해 호출되어야 비동기가 적용된다.
+    //        같은 클래스 내부에서 호출하면 프록시를 거치지 않아 동기 실행됨.
     @Async("slackTaskExecutor")
     @Override
     public CompletableFuture<String> searchByKeyword(String keyword) {
         log.info("Keyword search requested: keyword='{}'", keyword);
-        List<JiraSearchHit> hits = jiraApiClient.searchByText(keyword, MAX_SEARCH_RESULTS);
-        return CompletableFuture.completedFuture(formatHits(keyword, hits));
+        prefetchFromJira();
+        List<IssueEntity> results = issueRepository.searchByKeyword(escapeWildcards(keyword), PageRequest.of(0, MAX_SEARCH_RESULTS));
+        return CompletableFuture.completedFuture(formatSearchResults(keyword, results));
     }
 
     @Async("slackTaskExecutor")
     @Override
     public CompletableFuture<String> searchSemantic(String userQuery, String fallbackKeyword) {
         log.info("Semantic search requested: query='{}' fallback='{}'", userQuery, fallbackKeyword);
-        // STUDY: 1차로 사용자 자연어 그대로 Jira text ~ 매칭. Jira 의 풀텍스트 인덱스가 한국어 토크나이징도 처리.
-        List<JiraSearchHit> hits = jiraApiClient.searchByText(userQuery, MAX_SEARCH_RESULTS);
-        if (hits.isEmpty() && fallbackKeyword != null && !fallbackKeyword.isBlank()
-                && !fallbackKeyword.equals(userQuery)) {
-            // STUDY: 자연어 query 가 너무 길거나 노이즈가 많아 0건일 때, Haiku 가 추출해 둔 fallbackKeyword 로 한 번 더 시도.
-            log.info("Empty result for query, retrying with fallback keyword: '{}'", fallbackKeyword);
-            hits = jiraApiClient.searchByText(fallbackKeyword, MAX_SEARCH_RESULTS);
-            return CompletableFuture.completedFuture(formatHits(fallbackKeyword, hits));
+        prefetchFromJira();
+        try {
+            List<IssueEntity> allIssues = issueRepository.findAll();
+            if (allIssues.isEmpty()) {
+                return CompletableFuture.completedFuture(
+                        ":mag: 검색할 이슈가 없습니다. `@지라 sync`로 먼저 동기화해주세요.");
+            }
+
+            List<IssueSearchEntry> entries = allIssues.stream()
+                    .map(issue -> new IssueSearchEntry(
+                            issue.getIssueKey(),
+                            issue.getSummary(),
+                            issue.getDescription(),
+                            issue.getStatusCategory(),
+                            issue.getAssignee()))
+                    .toList();
+
+            List<String> matchedKeys = claudeApiClient.searchIssues(userQuery, entries);
+
+            if (matchedKeys == null || matchedKeys.isEmpty()) {
+                log.info("Sonnet returned empty results, falling back to keyword search: '{}'", fallbackKeyword);
+                // STUDY: Sonnet 빈 결과 시 키워드 fallback. 동일 스레드에서 직접 호출 (self-invocation이므로 @Async 무시됨, 이미 비동기 스레드 안이라 OK).
+                List<IssueEntity> keywordResults = issueRepository.searchByKeyword(
+                        escapeWildcards(fallbackKeyword), PageRequest.of(0, MAX_SEARCH_RESULTS));
+                return CompletableFuture.completedFuture(formatSearchResults(fallbackKeyword, keywordResults));
+            }
+
+            // STUDY: Sonnet이 반환한 키 순서(관련도순)를 유지하면서 DB 엔티티를 매칭한다.
+            Map<String, IssueEntity> issueMap = allIssues.stream()
+                    .collect(Collectors.toMap(IssueEntity::getIssueKey, issue -> issue, (a, b) -> a));
+            List<IssueEntity> matched = matchedKeys.stream()
+                    .filter(issueMap::containsKey)
+                    .map(issueMap::get)
+                    .toList();
+
+            if (matched.isEmpty()) {
+                return CompletableFuture.completedFuture(
+                        String.format(":mag: \"%s\" 검색 결과가 없습니다.", userQuery));
+            }
+
+            return CompletableFuture.completedFuture(formatSearchResults(userQuery, matched));
+
+        } catch (Exception e) {
+            log.warn("Semantic search failed, falling back to keyword search: {}", e.toString());
+            List<IssueEntity> keywordResults = issueRepository.searchByKeyword(
+                    escapeWildcards(fallbackKeyword), PageRequest.of(0, MAX_SEARCH_RESULTS));
+            return CompletableFuture.completedFuture(formatSearchResults(fallbackKeyword, keywordResults));
         }
-        return CompletableFuture.completedFuture(formatHits(userQuery, hits));
+    }
+
+    // STUDY: LIKE 와일드카드 이스케이프. 사용자 입력에 %, _, \ 가 포함되면 JPQL LIKE 쿼리에서 예기치 않은 매칭을 일으킬 수 있다.
+    //        ESCAPE '\' 절과 함께 사용하여 리터럴 문자로 취급한다.
+    String escapeWildcards(String keyword) {
+        return keyword.replace("\\", "\\\\")
+                      .replace("%", "\\%")
+                      .replace("_", "\\_");
     }
 
     // STUDY: 패키지-프라이빗으로 선언하여 테스트에서 직접 호출 가능.
-    String formatHits(String keyword, List<JiraSearchHit> hits) {
-        if (hits.isEmpty()) {
+    String formatSearchResults(String keyword, List<IssueEntity> results) {
+        if (results.isEmpty()) {
             return String.format(":mag: \"%s\" 검색 결과가 없습니다.", keyword);
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append(":mag: 검색결과 최상위 ").append(MAX_SEARCH_RESULTS).append("개입니다:\n");
+        sb.append(String.format(":mag: \"%s\" 검색 결과 (%d건)\n", keyword, results.size()));
 
-        int displayCount = Math.min(hits.size(), MAX_SEARCH_RESULTS);
+        int displayCount = Math.min(results.size(), SEARCH_MAX_DISPLAY);
         for (int i = 0; i < displayCount; i++) {
-            JiraSearchHit hit = hits.get(i);
-            String url = issueLink(hit.key());
-            String assignee = (hit.assignee() == null || hit.assignee().isBlank())
-                    ? "미배정" : hit.assignee();
-            sb.append(i + 1).append(". <").append(url).append("|").append(hit.key()).append("> ")
-                    .append(hit.summary()).append(" (")
-                    .append(hit.status() == null || hit.status().isBlank() ? "-" : hit.status())
-                    .append(", 담당: ").append(assignee).append(")\n");
+            IssueEntity issue = results.get(i);
+            String url = issueLink(issue.getIssueKey());
+            String assignee = issue.getAssignee() != null ? issue.getAssignee() : "미배정";
+            String sp = issue.getStoryPoint() != null
+                    ? String.valueOf(issue.getStoryPoint().intValue()) : "-";
+            sb.append(String.format("• <%s|%s> %s (%s, SP %s, 담당: %s)\n",
+                    url, issue.getIssueKey(), issue.getSummary(),
+                    issue.getStatusCategory(), sp, assignee));
         }
 
-        // STUDY: 5개를 가득 채워 받은 경우에만 더 있을 가능성이 있음을 표기.
-        //        그 이하라면 결과가 완전하다는 의미이므로 생략 라인을 붙이지 않는다.
-        if (hits.size() >= MAX_SEARCH_RESULTS) {
-            sb.append("(이하 생략)");
+        if (results.size() > SEARCH_MAX_DISPLAY) {
+            sb.append(String.format("외 %d건이 더 있습니다.", results.size() - SEARCH_MAX_DISPLAY));
         }
 
         return sb.toString().stripTrailing();
