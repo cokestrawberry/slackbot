@@ -22,7 +22,7 @@ import com.jirabot.slack.service.IssueCreateService;
 import com.jirabot.slack.service.IssueSearchService;
 import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ReminderSubscriptionService;
-import com.jirabot.slack.service.ScrumReportService;
+import com.jirabot.slack.service.SprintReportService;
 import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -57,7 +57,7 @@ public class SlackEventController {
 
             *키워드 명령 (즉시 실행):*
               `@봇더지라 help` — 이 도움말 표시
-              `@봇더지라 scrum` — 스프린트 일일 리포트
+              `@봇더지라 sprint` — 스프린트 일일 리포트
               `@봇더지라 내작업` — 내 진행 중인 작업 조회
               `@봇더지라 작업 Alice` — 특정 팀원의 작업 조회
               `@봇더지라 등록 <Jira 사용자명>` — 내 Slack ↔ Jira 계정 연결
@@ -88,7 +88,7 @@ public class SlackEventController {
 
     private final IssueCreateService issueCreateService;
     private final IssueSearchService issueSearchService;
-    private final ScrumReportService scrumReportService;
+    private final SprintReportService sprintReportService;
     private final BugQueryService bugQueryService;
     private final JiraSyncService jiraSyncService;
     private final JiraApiClient jiraApiClient;
@@ -106,7 +106,7 @@ public class SlackEventController {
 
     public SlackEventController(IssueCreateService issueCreateService,
                                 IssueSearchService issueSearchService,
-                                ScrumReportService scrumReportService,
+                                SprintReportService sprintReportService,
                                 BugQueryService bugQueryService,
                                 JiraSyncService jiraSyncService,
                                 JiraApiClient jiraApiClient,
@@ -123,7 +123,7 @@ public class SlackEventController {
                                 @Value("${slack.allowed-channels:}") String allowedChannelsConfig) {
         this.issueCreateService = issueCreateService;
         this.issueSearchService = issueSearchService;
-        this.scrumReportService = scrumReportService;
+        this.sprintReportService = sprintReportService;
         this.bugQueryService = bugQueryService;
         this.jiraSyncService = jiraSyncService;
         this.jiraApiClient = jiraApiClient;
@@ -170,7 +170,7 @@ public class SlackEventController {
         // 1차: 키워드 매칭 (스레드 안밖 모두 동작)
         switch (lower) {
             case "help", "도움말" -> { handleHelp(event); return; }
-            case "scrum", "스크럼" -> { handleScrum(event); return; }
+            case "sprint", "스프린트" -> { handleSprint(event); return; }
             case "내작업", "my" -> { handleMyWork(event); return; }
             case "sync", "동기화" -> { handleSync(event); return; }
             case "완료", "done" -> { handleComplete(event); return; }
@@ -415,8 +415,8 @@ public class SlackEventController {
                         handleStatistics(event);
                 case "my_tasks" ->
                         handleMyWork(event);
-                case "scrum_report" ->
-                        handleScrum(event);
+                case "sprint_report" ->
+                        handleSprint(event);
                 case "sync_request" ->
                         handleSync(event);
                 case "complete_issue" ->
@@ -473,20 +473,20 @@ public class SlackEventController {
 
     // STUDY: 스레드에서 호출하면 스레드에 응답, 채널에서 호출하면 채널 메시지로 응답.
     //        thread_ts가 있으면 스레드 내 댓글, 없으면 일반 메시지.
-    private void handleScrum(SlackEventInner event) {
-        log.info("Scrum report requested by user={}", event.user());
-        scrumReportService.generateReport()
+    private void handleSprint(SlackEventInner event) {
+        log.info("Sprint report requested by user={}", event.user());
+        sprintReportService.generateReport()
                 .thenAccept(reports -> reports.forEach(r -> reply(event, r)))
                 .exceptionally(ex -> {
-                    log.warn("Scrum report failed: {}", ex.toString());
-                    replyThread(event, ":x: 스크럼 리포트 생성 중 오류가 발생했어요.");
+                    log.warn("Sprint report failed: {}", ex.toString());
+                    replyThread(event, ":x: 스프린트 리포트 생성 중 오류가 발생했어요.");
                     return null;
                 });
     }
 
     private void handleMyWork(SlackEventInner event) {
         log.info("My work requested by user={}", event.user());
-        scrumReportService.generateMyReport(event.user())
+        sprintReportService.generateMyReport(event.user())
                 .thenAccept(report -> {
                     if (event.channel() != null && event.ts() != null) {
                         slackNotifier.postThreadReply(event.channel(), event.ts(), report);
@@ -611,7 +611,7 @@ public class SlackEventController {
 
     private void handleMemberWork(SlackEventInner event, String memberName) {
         log.info("Member work requested for name={} by user={}", memberName, event.user());
-        scrumReportService.generateMemberReport(memberName)
+        sprintReportService.generateMemberReport(memberName)
                 .thenAccept(report -> {
                     if (event.channel() != null && event.ts() != null) {
                         slackNotifier.postThreadReply(event.channel(), event.ts(), report);
@@ -627,7 +627,7 @@ public class SlackEventController {
     // STUDY: 다른 핸들러와 동일하게 replyThread()로 스레드 응답. 채널에 긴 리포트가 올라가면 대화 흐름 방해.
     private void handleStatistics(SlackEventInner event) {
         log.info("Statistics report requested by user={}", event.user());
-        scrumReportService.generateStatisticsReport()
+        sprintReportService.generateStatisticsReport()
                 .thenAccept(report -> replyThread(event, report))
                 .exceptionally(ex -> {
                     log.warn("Statistics report failed: {}", ex.toString());

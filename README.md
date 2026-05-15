@@ -21,7 +21,7 @@ Slack 채널에서 자연어로 메시지를 보내면 AI가 자동 분류하여
 ```
 Slack 메시지 → ngrok → Go Bot(:3000) → Spring Boot(:8080)
     → SlackSignatureFilter (HMAC 검증)
-    → 키워드 매칭 (help/scrum/내작업/sync/완료/작업)
+    → 키워드 매칭 (help/sprint/내작업/sync/완료/작업)
     → Haiku 의도 분류 (register_bug/register_story/search/...)
     → Sonnet 상세 분류 (제목/SP/타입)
     → Jira API (이슈 생성) + PostgreSQL (로컬 저장)
@@ -100,7 +100,7 @@ ngrok http 3000
 | 명령 | 설명 |
 |---|---|
 | `@봇더지라 help` | 도움말 표시 |
-| `@봇더지라 scrum` | 스프린트 일일 리포트 |
+| `@봇더지라 sprint` | 스프린트 일일 리포트 |
 | `@봇더지라 내작업` | 내 진행 중인 작업 조회 |
 | `@봇더지라 작업 Alice` | 특정 팀원의 작업 조회 |
 | `@봇더지라 검색 <키워드>` | 이슈 제목으로 검색 |
@@ -255,7 +255,7 @@ cd bot && go test ./...  # Go Bot 테스트
 slackbot/
 ├── src/main/java/com/jirabot/slack/
 │   ├── controller/     # SlackEventController, SlackInteractionController, HealthController, UserMappingController
-│   ├── service/        # IssueCreateService, ScrumReportService, JiraSyncService, DuplicateDetectionService
+│   ├── service/        # IssueCreateService, SprintReportService, JiraSyncService, DuplicateDetectionService
 │   ├── client/         # ClaudeApiClient, JiraApiClient, IntentClassifier, ThreadActionClassifier, SlackNotifier
 │   ├── entity/         # IssueEntity, IntentFailureEntity, UserMappingEntity
 │   ├── repository/     # JPA Repositories

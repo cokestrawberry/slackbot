@@ -21,7 +21,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.domain.PageRequest;
 
-class ScrumReportStatisticsTest {
+class SprintReportStatisticsTest {
 
     private static final int SPRINT_ID = 42;
     private static final String SPRINT_NAME = "Sprint 5";
@@ -31,8 +31,8 @@ class ScrumReportStatisticsTest {
     private final SlackNotifier slackNotifier = mock(SlackNotifier.class);
     private final JiraProperties jiraProps = new JiraProperties(
             "https://example.atlassian.net", "u@x.com", "token", "PROJ", null, null);
-    private final ScrumReportServiceImpl service =
-            new ScrumReportServiceImpl(issueRepository, userMappingRepository, slackNotifier, jiraProps);
+    private final SprintReportServiceImpl service =
+            new SprintReportServiceImpl(issueRepository, userMappingRepository, slackNotifier, jiraProps);
 
     @BeforeEach
     void setupSprintInfo() {

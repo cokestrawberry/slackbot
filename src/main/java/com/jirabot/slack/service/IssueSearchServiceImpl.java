@@ -16,7 +16,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 // STUDY: @Async("slackTaskExecutor") 패턴으로 비동기 실행. 컨트롤러는 CompletableFuture.thenAccept()로 결과만 받는다.
-//        ScrumReportServiceImpl과 동일한 패턴.
+//        SprintReportServiceImpl과 동일한 패턴.
 @Service
 public class IssueSearchServiceImpl implements IssueSearchService {
 

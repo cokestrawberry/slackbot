@@ -61,7 +61,7 @@ public class IssueEntity {
     private Instant syncedAt;
 
     // STUDY: 하위 작업이면 부모 이슈 키, 일반 이슈/스토리/Epic 등이면 null.
-    //        scrum 리포트의 hierarchical 표시에 사용 (subtask 를 parent 아래 들여쓰기).
+    //        sprint 리포트의 hierarchical 표시에 사용 (subtask 를 parent 아래 들여쓰기).
     private String parentKey;
 
     // STUDY: issuetype.subtask boolean. 타입명은 API/언어에 따라 "Sub-task"/"하위 작업" 등 달라지지만

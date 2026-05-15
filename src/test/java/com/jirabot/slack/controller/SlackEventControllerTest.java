@@ -25,7 +25,7 @@ import com.jirabot.slack.service.IssueCreateResult;
 import com.jirabot.slack.service.IssueCreateService;
 import com.jirabot.slack.service.IssueSearchService;
 import com.jirabot.slack.service.JiraSyncService;
-import com.jirabot.slack.service.ScrumReportService;
+import com.jirabot.slack.service.SprintReportService;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +42,7 @@ class SlackEventControllerTest {
 
     private IssueCreateService issueCreateService;
     private IssueSearchService issueSearchService;
-    private ScrumReportService scrumReportService;
+    private SprintReportService sprintReportService;
     private BugQueryService bugQueryService;
     private JiraSyncService jiraSyncService;
     private JiraApiClient jiraApiClient;
@@ -61,7 +61,7 @@ class SlackEventControllerTest {
     void setUp() {
         issueCreateService = mock(IssueCreateService.class);
         issueSearchService = mock(IssueSearchService.class);
-        scrumReportService = mock(ScrumReportService.class);
+        sprintReportService = mock(SprintReportService.class);
         bugQueryService = mock(BugQueryService.class);
         jiraSyncService = mock(JiraSyncService.class);
         jiraApiClient = mock(JiraApiClient.class);
@@ -76,7 +76,7 @@ class SlackEventControllerTest {
         Executor directExecutor = Runnable::run;
         SlackEventDeduplicator deduplicator = new SlackEventDeduplicator();
         controller = new SlackEventController(
-                issueCreateService, issueSearchService, scrumReportService, bugQueryService,
+                issueCreateService, issueSearchService, sprintReportService, bugQueryService,
                 jiraSyncService, jiraApiClient, jiraProps, issueRepository, intentClassifier,
                 threadActionClassifier, intentFailureRepository,
                 userMappingRepository, slackNotifier,
@@ -213,12 +213,12 @@ class SlackEventControllerTest {
     }
 
     @Test
-    void scrumCommand_dispatchesToScrumService() throws Exception {
-        when(scrumReportService.generateReport())
+    void sprintCommand_dispatchesToSprintService() throws Exception {
+        when(sprintReportService.generateReport())
                 .thenReturn(CompletableFuture.completedFuture(java.util.List.of("리포트")));
         String body = """
                 {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> scrum","channel":"C1","ts":"1.0"}}
+                    "type":"app_mention","user":"U1","text":"<@U0BOT> sprint","channel":"C1","ts":"1.0"}}
                 """;
 
         mockMvc.perform(post("/api/slack/event")
@@ -227,7 +227,7 @@ class SlackEventControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.ok").value(true));
 
-        verify(scrumReportService).generateReport();
+        verify(sprintReportService).generateReport();
         verify(issueCreateService, never()).createFromSlackText(any());
     }
 
@@ -249,7 +249,7 @@ class SlackEventControllerTest {
 
     @Test
     void myWorkCommand_dispatchesToMyReport() throws Exception {
-        when(scrumReportService.generateMyReport(any()))
+        when(sprintReportService.generateMyReport(any()))
                 .thenReturn(CompletableFuture.completedFuture("내 작업"));
         String body = """
                 {"type":"event_callback","event":{
@@ -261,7 +261,7 @@ class SlackEventControllerTest {
                         .content(body))
                 .andExpect(status().isOk());
 
-        verify(scrumReportService).generateMyReport("U1");
+        verify(sprintReportService).generateMyReport("U1");
         verify(issueCreateService, never()).createFromSlackText(any());
     }
 

@@ -11,7 +11,7 @@ Classify the user's message into exactly one Jira intent and return structured J
 | `register_bug` | bug, error, defect, crash, fix, broken, fail, 오류, 에러, 버그, 안 돼, 깨짐, 안 됨, 안됨, 안맞아, 안 맞아, 실패, 문제, 이상, 작동 안, 동작 안, 안 나와, 안나와, 느려, 멈춤, 죽어 |
 | `statistics` | stats, count, how many, summary, dashboard, 통계, 몇 개, 현황, 집계 |
 | `my_tasks` | my tasks, what should I do, 내 작업, 내 할 일, 뭐 해야, 해야될, 할 일, 배정된, 담당 (self-focused; "내가/제가" 같은 1인칭) |
-| `scrum_report` | sprint, scrum, daily, standup, 스프린트, 스크럼, 진행 상황, 팀 작업, 어떻게 되고 있어, 이번 스프린트 (team/sprint-focused) |
+| `sprint_report` | sprint, scrum, daily, standup, 스프린트, 스크럼, 진행 상황, 팀 작업, 어떻게 되고 있어, 이번 스프린트 (team/sprint-focused) |
 | `sync_request` | sync, refresh, reload, pull latest, 동기화, 새로고침, 최신화, 갱신, 끌어와 |
 | `complete_issue` | complete, done, finish, mark as done, 완료, 끝났, 다 했, 마쳤 (referring to the current issue) |
 | `reminder_toggle` | reminder, 리마인더, 알림 (with on/off/status modifier or query about current state) |
@@ -25,7 +25,7 @@ Classify the user's message into exactly one Jira intent and return structured J
 - When a message describes something not working, mismatching, failing, or behaving incorrectly → `register_bug`. Even without explicit "에러/버그" keywords.
 - "키 preset 이 안맞아요", "데이터가 이상해요", "화면이 안 나와요" → all `register_bug`.
 - When a message describes work that needs to be done (구현, 정리, 개선, 구조 변경, 작업 필요 등) without error context → `register_story`. These are task/feature requests, not bugs.
-- `my_tasks` vs `scrum_report`: if message uses 1st-person framing ("내", "제가", "나") → `my_tasks`. If it asks about team or sprint as a whole ("이번 스프린트", "팀", "스크럼", "진행 상황") → `scrum_report`. Ambiguous "뭐 해야 해?" → `my_tasks` unless sprint/team context present.
+- `my_tasks` vs `sprint_report`: if message uses 1st-person framing ("내", "제가", "나") → `my_tasks`. If it asks about team or sprint as a whole ("이번 스프린트", "팀", "스크럼", "진행 상황") → `sprint_report`. Ambiguous "뭐 해야 해?" → `my_tasks` unless sprint/team context present.
 - `reminder_toggle` extracts `action` field with values "on", "off", or "status". "리마인더 켜줘"/"알림 활성화" → on. "리마인더 꺼줘" → off. "리마인더 어떻게 돼있어?"/"리마인더 상태" → status. If unclear, omit action so the handler shows usage.
 - `complete_issue` should only fire when the user is clearly marking an issue as done in context. Vague "끝났어" without issue reference → `skip`. The handler itself further requires a thread with a parent issue.
 
@@ -33,7 +33,7 @@ Classify the user's message into exactly one Jira intent and return structured J
 
 Respond with ONLY valid JSON — no preamble, no explanation.
 
-{"intent":"search | register_story | register_bug | statistics | my_tasks | scrum_report | sync_request | complete_issue | reminder_toggle | skip | unknown","confidence":0.0,"extracted":{"keyword":"issue title or search term (omit if absent)","project":"project key e.g. PROJ (omit if absent)","priority":"high | medium | low (omit if absent)","action":"on | off | status (only for reminder_toggle)"},"raw_input":"original user message"}
+{"intent":"search | register_story | register_bug | statistics | my_tasks | sprint_report | sync_request | complete_issue | reminder_toggle | skip | unknown","confidence":0.0,"extracted":{"keyword":"issue title or search term (omit if absent)","project":"project key e.g. PROJ (omit if absent)","priority":"high | medium | low (omit if absent)","action":"on | off | status (only for reminder_toggle)"},"raw_input":"original user message"}
 
 Omit any `extracted` key that has no clear value in the input.
 
@@ -73,13 +73,13 @@ Input: "오늘 날씨 좋다"
 Output: {"intent":"unknown","confidence":0.99,"extracted":{},"raw_input":"오늘 날씨 좋다"}
 
 Input: "이번 스프린트에 뭐 해야 해?"
-Output: {"intent":"scrum_report","confidence":0.92,"extracted":{},"raw_input":"이번 스프린트에 뭐 해야 해?"}
+Output: {"intent":"sprint_report","confidence":0.92,"extracted":{},"raw_input":"이번 스프린트에 뭐 해야 해?"}
 
 Input: "스프린트 진행 상황 알려줘"
-Output: {"intent":"scrum_report","confidence":0.96,"extracted":{},"raw_input":"스프린트 진행 상황 알려줘"}
+Output: {"intent":"sprint_report","confidence":0.96,"extracted":{},"raw_input":"스프린트 진행 상황 알려줘"}
 
 Input: "팀 작업 어떻게 되고 있어?"
-Output: {"intent":"scrum_report","confidence":0.9,"extracted":{},"raw_input":"팀 작업 어떻게 되고 있어?"}
+Output: {"intent":"sprint_report","confidence":0.9,"extracted":{},"raw_input":"팀 작업 어떻게 되고 있어?"}
 
 Input: "지금 Jira 동기화해줘"
 Output: {"intent":"sync_request","confidence":0.96,"extracted":{},"raw_input":"지금 Jira 동기화해줘"}

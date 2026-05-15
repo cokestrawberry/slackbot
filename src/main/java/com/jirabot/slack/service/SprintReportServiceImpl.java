@@ -26,9 +26,9 @@ import org.springframework.stereotype.Service;
 // STUDY: Jira API 직접 호출에서 DB 조회로 전환. 응답 속도 대폭 개선 (API 수초 → DB 수ms).
 //        데이터 정확성은 앱 시작 시 + 매일 8시 자동 동기화 + @봇더지라 sync 수동 동기화로 보장.
 @Service
-public class ScrumReportServiceImpl implements ScrumReportService {
+public class SprintReportServiceImpl implements SprintReportService {
 
-    private static final Logger log = LoggerFactory.getLogger(ScrumReportServiceImpl.class);
+    private static final Logger log = LoggerFactory.getLogger(SprintReportServiceImpl.class);
 
     private final IssueRepository issueRepository;
     private final UserMappingRepository userMappingRepository;
@@ -38,7 +38,7 @@ public class ScrumReportServiceImpl implements ScrumReportService {
     //        봇 응답을 UI 와 일치시키기 위해 SP 집계에서 subtask 타입을 제외한다.
     private final String subtaskTypeName;
 
-    public ScrumReportServiceImpl(IssueRepository issueRepository,
+    public SprintReportServiceImpl(IssueRepository issueRepository,
                                   UserMappingRepository userMappingRepository,
                                   SlackNotifier slackNotifier,
                                   com.jirabot.slack.config.JiraProperties jiraProps) {
@@ -85,12 +85,12 @@ public class ScrumReportServiceImpl implements ScrumReportService {
             if (messages.isEmpty()) {
                 return CompletableFuture.completedFuture(List.of("표시할 이슈가 없습니다."));
             }
-            log.info("Scrum report generated sprint={} backlog={}", sprintIssues.size(), backlogIssues.size());
+            log.info("Sprint report generated sprint={} backlog={}", sprintIssues.size(), backlogIssues.size());
             return CompletableFuture.completedFuture(messages);
         } catch (Exception e) {
-            log.error("Scrum report generation failed: {}", e.toString());
+            log.error("Sprint report generation failed: {}", e.toString());
             return CompletableFuture.completedFuture(
-                    List.of("스크럼 리포트 생성에 실패했습니다: " + e.getMessage()));
+                    List.of("스프린트 리포트 생성에 실패했습니다: " + e.getMessage()));
         }
     }
 
