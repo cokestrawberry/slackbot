@@ -38,6 +38,26 @@ public interface JiraApiClient {
     boolean transitionIssue(String issueKey, String targetStatusName);
 
     /**
+     * Jira 에 해당 이슈가 존재하는지. 404 면 false(삭제됨), 200 이면 true.
+     * 불확실(네트워크/5xx)하면 보존을 위해 true 를 반환한다(삭제 prune 의 오삭제 방지).
+     */
+    boolean issueExists(String issueKey);
+
+    /**
+     * 단건 이슈를 라이브 조회한다 (이슈 키 조회 카드의 로컬 DB 미보유 폴백).
+     * 404(삭제/권한 없음) 또는 실패 시 empty.
+     */
+    Optional<SprintIssue> getIssue(String issueKey);
+
+    /**
+     * 이슈의 담당자를 변경한다.
+     *
+     * @param accountId 새 담당자 Jira accountId (null 이면 담당자 해제)
+     * @return 성공 여부 (204)
+     */
+    boolean assignIssue(String issueKey, String accountId);
+
+    /**
      * Create a sub-task under a parent issue.
      *
      * @param jiraAccountId 보고자/담당자 Jira accountId (null이면 API 토큰 소유자가 기본값)
@@ -62,13 +82,12 @@ public interface JiraApiClient {
     void appendDescription(String issueKey, String additionalText);
 
     /**
-     * Jira REST /rest/api/3/search 를 통한 풀텍스트 검색.
-     * JQL `text ~ "<query>"` 형태로 summary / description / comment 를 모두 본다.
-     * DB 동기화 여부와 무관하게 Jira 에 존재하는 모든 이슈가 후보가 된다.
-     *
-     * @param query      사용자 입력 텍스트 (자유 형식, JQL 안전화는 구현 측 책임)
-     * @param maxResults 응답 상한 (Jira 의 기본 maxResults 는 50)
-     * @return 매칭 이슈 목록. 검색 실패 시 빈 리스트.
+     * JQL 로 이슈를 조회한다(페이지네이션 포함). 버그 백필 등 범용 검색용.
      */
-    List<JiraSearchHit> searchByText(String query, int maxResults);
+    List<SprintIssue> searchByJql(String jql);
+
+    /**
+     * 이슈의 댓글 본문 목록을 조회한다(오래된 순). 버그 해결 요약 입력용.
+     */
+    List<String> getComments(String issueKey);
 }

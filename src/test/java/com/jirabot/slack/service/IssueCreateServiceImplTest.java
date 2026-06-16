@@ -15,18 +15,24 @@ import com.jirabot.slack.client.ClaudeApiClient;
 import com.jirabot.slack.client.JiraApiClient;
 import com.jirabot.slack.client.JiraApiException;
 import com.jirabot.slack.client.SlackNotifier;
+import com.jirabot.slack.client.dto.IntentResult;
 import com.jirabot.slack.client.dto.IssueClassification;
 import com.jirabot.slack.client.dto.JiraCreateResponse;
 import com.jirabot.slack.config.JiraProperties;
 import com.jirabot.slack.dto.IssueCreateCommand;
+import com.jirabot.slack.entity.IssueEntity;
+import com.jirabot.slack.entity.ResponseMetricEntity;
 import com.jirabot.slack.entity.UserMappingEntity;
 import com.jirabot.slack.repository.IssueRepository;
+import com.jirabot.slack.repository.ResponseMetricRepository;
 import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.DuplicateDetectionService;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class IssueCreateServiceImplTest {
 
@@ -36,11 +42,12 @@ class IssueCreateServiceImplTest {
     private final DuplicateDetectionService duplicateDetection = mock(DuplicateDetectionService.class);
     private final IssueRepository issueRepository = mock(IssueRepository.class);
     private final UserMappingRepository userMappingRepository = mock(UserMappingRepository.class);
+    private final ResponseMetricRepository responseMetricRepository = mock(ResponseMetricRepository.class);
     private final JiraProperties jiraProps = new JiraProperties(
             "https://example.atlassian.net", "u@x.com", "token", "PROJ", null, null);
     private final IssueCreateServiceImpl service =
             new IssueCreateServiceImpl(claude, jira, jiraProps, slackNotifier, duplicateDetection,
-                    issueRepository, userMappingRepository);
+                    issueRepository, userMappingRepository, responseMetricRepository);
 
     @Test
     void happyPath_createsIssueAndReturnsUrl() throws ExecutionException, InterruptedException {
@@ -136,6 +143,128 @@ class IssueCreateServiceImplTest {
         // Should NOT call Claude classify or Jira API
         verify(claude, never()).classify(anyString(), any());
         verify(jira, never()).createIssue(any(), anyString(), any());
+    }
+
+    @Test
+    void registerEpicIntent_forcesEpicTypeAndZeroStoryPoint() throws Exception {
+        when(userMappingRepository.findBySlackUserId("U_E"))
+                .thenReturn(Optional.of(new UserMappingEntity("U_E", "Kim", "김영현")));
+
+        // Sonnet 이 FEATURE/SP5 로 분류해도 register_epic 의도면 EPIC/SP0 으로 강제되어야 한다.
+        var sonnet = new IssueClassification(
+                IssueClassification.IssueType.FEATURE, 5, "GCP 배포 확장", "요약");
+        when(claude.classify(anyString(), any())).thenReturn(sonnet);
+        when(duplicateDetection.findSimilar(anyString())).thenReturn(List.of());
+        when(jira.createIssue(any(), anyString(), any()))
+                .thenReturn(new JiraCreateResponse("10009", "PROJ-9", "https://..."));
+
+        var intent = new IntentResult("register_epic", 1.0, Map.of(), "에픽 GCP 배포 확장");
+        var cmd = new IssueCreateCommand("에픽 GCP 배포 확장", "U_E", "C1", "1.0");
+        var result = service.createFromSlackText(cmd, intent).get();
+
+        assertThat(result.success()).isTrue();
+        ArgumentCaptor<IssueClassification> cap = ArgumentCaptor.forClass(IssueClassification.class);
+        verify(jira).createIssue(cap.capture(), anyString(), any());
+        assertThat(cap.getValue().type()).isEqualTo(IssueClassification.IssueType.EPIC);
+        assertThat(cap.getValue().storyPoint()).isZero();
+        assertThat(cap.getValue().title()).isEqualTo("GCP 배포 확장");
+    }
+
+    @Test
+    void savedEntity_reporterIsJiraDisplayName_notSlackUserId() throws Exception {
+        // IssueEntity.reporter 계약: Jira displayName. Slack ID 가 저장되면
+        // webhook DM 의 resolveMention 이 매핑 조회에 실패해 raw ID 가 노출된다.
+        when(userMappingRepository.findBySlackUserId("U03L1TJ0EBB"))
+                .thenReturn(Optional.of(new UserMappingEntity("U03L1TJ0EBB", "Kim", "YeongHyeonKim")));
+
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.FEATURE, 2, "audit log 확인", "요약");
+        when(claude.classify(anyString(), any())).thenReturn(classification);
+        when(duplicateDetection.findSimilar(anyString())).thenReturn(List.of());
+        when(jira.createIssue(eq(classification), anyString(), any()))
+                .thenReturn(new JiraCreateResponse("10003", "PROJ-3", "https://..."));
+
+        var cmd = new IssueCreateCommand("audit log 확인", "U03L1TJ0EBB", "C1", "1.0");
+        var result = service.createFromSlackText(cmd).get();
+
+        assertThat(result.success()).isTrue();
+        ArgumentCaptor<IssueEntity> cap = ArgumentCaptor.forClass(IssueEntity.class);
+        verify(issueRepository).save(cap.capture());
+        assertThat(cap.getValue().getReporter()).isEqualTo("YeongHyeonKim");
+        assertThat(cap.getValue().getReporter()).isNotEqualTo("U03L1TJ0EBB");
+    }
+
+    @Test
+    void successPath_recordsResponseMetricWithStageTimings() throws Exception {
+        when(userMappingRepository.findBySlackUserId("U1"))
+                .thenReturn(Optional.of(new UserMappingEntity("U1", "Kim", "김영현")));
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.BUG, 2, "title", "summary");
+        when(claude.classify(anyString(), any())).thenReturn(classification);
+        when(duplicateDetection.findSimilar(anyString())).thenReturn(List.of());
+        when(jira.createIssue(eq(classification), anyString(), any()))
+                .thenReturn(new JiraCreateResponse("10001", "PROJ-1", "https://..."));
+
+        var result = service.createFromSlackText(new IssueCreateCommand("x", "U1", "C1", "1.0")).get();
+
+        assertThat(result.success()).isTrue();
+        ArgumentCaptor<ResponseMetricEntity> cap = ArgumentCaptor.forClass(ResponseMetricEntity.class);
+        verify(responseMetricRepository).save(cap.capture());
+        ResponseMetricEntity metric = cap.getValue();
+        assertThat(metric.getAction()).isEqualTo("issue_create");
+        assertThat(metric.getIssueKey()).isEqualTo("PROJ-1");
+        assertThat(metric.isSuccess()).isTrue();
+        // eventTs "1.0"(1970년) 기준이므로 total 은 항상 양수이며 단계 시간이 모두 채워진다
+        assertThat(metric.getTotalMs()).isPositive();
+        assertThat(metric.getClassifyMs()).isNotNull();
+        assertThat(metric.getDuplicateMs()).isNotNull();
+        assertThat(metric.getJiraMs()).isNotNull();
+        assertThat(metric.getDbMs()).isNotNull();
+        assertThat(metric.getNotifyMs()).isNotNull();
+        assertThat(metric.getErrorType()).isNull();
+    }
+
+    @Test
+    void jiraFailure_recordsFailureMetricWithErrorType() throws Exception {
+        when(userMappingRepository.findBySlackUserId("U1"))
+                .thenReturn(Optional.of(new UserMappingEntity("U1", "User", "유저")));
+        when(claude.classify(anyString(), any())).thenReturn(IssueClassification.fallback("x"));
+        when(duplicateDetection.findSimilar(anyString())).thenReturn(List.of());
+        when(jira.createIssue(any(), anyString(), any())).thenThrow(new JiraApiException("400 bad"));
+
+        var result = service.createFromSlackText(new IssueCreateCommand("x", "U1", "C", "0")).get();
+
+        assertThat(result.success()).isFalse();
+        ArgumentCaptor<ResponseMetricEntity> cap = ArgumentCaptor.forClass(ResponseMetricEntity.class);
+        verify(responseMetricRepository).save(cap.capture());
+        ResponseMetricEntity metric = cap.getValue();
+        assertThat(metric.isSuccess()).isFalse();
+        assertThat(metric.getErrorType()).isEqualTo("JiraApiException");
+        assertThat(metric.getIssueKey()).isNull();
+        // Jira 단계에서 죽었으므로 분류/중복 시간은 있고 jira 이후는 비어 있다
+        assertThat(metric.getClassifyMs()).isNotNull();
+        assertThat(metric.getDuplicateMs()).isNotNull();
+        assertThat(metric.getJiraMs()).isNull();
+    }
+
+    @Test
+    void metricSaveFailure_doesNotBreakIssueCreation() throws Exception {
+        when(userMappingRepository.findBySlackUserId("U1"))
+                .thenReturn(Optional.of(new UserMappingEntity("U1", "Kim", "김영현")));
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.BUG, 2, "title", "summary");
+        when(claude.classify(anyString(), any())).thenReturn(classification);
+        when(duplicateDetection.findSimilar(anyString())).thenReturn(List.of());
+        when(jira.createIssue(eq(classification), anyString(), any()))
+                .thenReturn(new JiraCreateResponse("10001", "PROJ-1", "https://..."));
+        doThrow(new RuntimeException("DB down"))
+                .when(responseMetricRepository).save(any(ResponseMetricEntity.class));
+
+        var result = service.createFromSlackText(new IssueCreateCommand("x", "U1", "C1", "1.0")).get();
+
+        // 계측 실패는 non-fatal — 이슈 생성 결과에 영향이 없어야 한다
+        assertThat(result.success()).isTrue();
+        assertThat(result.issueKey()).isEqualTo("PROJ-1");
     }
 
     @Test

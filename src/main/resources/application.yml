@@ -6,18 +6,32 @@ spring:
     name: slackbot-server
   # STUDY: Spring Boot는 application.yml/properties에서 ${VAR:default} 로 env var 주입 가능.
   datasource:
-    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:jirabot}
+    # STUDY: 호스트를 변수화 — bare-metal 은 기본 localhost, docker-compose 에서는 POSTGRES_HOST=postgres 주입.
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:jirabot}
     username: ${POSTGRES_USER:jirabot}
     password: ${POSTGRES_PASSWORD:jirabot}
     driver-class-name: org.postgresql.Driver
+    # STUDY: HikariCP 기본 풀(10)은 slackTaskExecutor(max 10) + 스케줄러/웹훅이 겹치면 빠듯하다.
+    #        명시적으로 늘려 커넥션 대기 지연을 예방 (Postgres 기본 max_connections=100 내 여유).
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:15}
+  # STUDY: 스키마는 Flyway 마이그레이션(db/migration/V*.sql)으로만 변경한다.
+  #        기존 운영 DB 는 baseline-on-migrate 로 V1(현 스키마)을 "이미 적용됨" 처리하고,
+  #        신규(빈) DB 는 V1 부터 실행해 전체 스키마를 만든다.
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 1
   jpa:
-    # STUDY: ddl-auto=update는 개발용. 운영에서는 Flyway/Liquibase + validate 권장 (Phase 5).
+    # STUDY: validate — 엔티티와 실제 스키마가 어긋나면 기동 자체가 실패한다.
+    #        update 시절 "ALTER 실패가 WARN 에 묻혀 런타임에 깨지는" 사고(레슨 L8)의 근본 해결.
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      ddl-auto: validate
+    # STUDY: show-sql 은 매 쿼리를 stdout 에 찍어 운영 성능/로그 용량을 갉아먹는다. 기본 끄고
+    #        디버깅 시에만 JPA_SHOW_SQL=true 로 켠다.
+    show-sql: ${JPA_SHOW_SQL:false}
     properties:
       hibernate:
-        format_sql: true
+        format_sql: false
         jdbc:
           time_zone: UTC
 
@@ -33,13 +47,15 @@ slack:
 claude:
   cli-path: ${CLAUDE_CLI_PATH:claude}
   model: claude-sonnet-4-6
+  # STUDY: 단순 변환 작업(브랜치 슬러그)용 경량 모델 — 지연 수 초 단축, 품질 동등.
+  fast-model: ${CLAUDE_FAST_MODEL:claude-haiku-4-5}
   timeout-seconds: 60
   permission-mode: plan
   max-turns: 1
   # STUDY: Haiku 의도 분류기 설정. --bare로 불필요한 컨텍스트 스킵, --system-prompt-file로 skill 전달.
   intent:
     model: claude-haiku-4-5
-    timeout-seconds: 15
+    timeout-seconds: 25
     prompt-file: prompts/haiku-classifier.md
 
 # Jira 설정 — spring-service-engineer의 JiraApiClient
@@ -48,18 +64,13 @@ jira:
   email: ${JIRA_EMAIL:}
   api-token: ${JIRA_API_TOKEN:}
   project-key: ${JIRA_PROJECT_KEY:}
-  # Jira → 봇 webhook 수신 설정. secret 이 비어있으면 모든 요청 403.
-  webhook:
-    enabled: ${JIRA_WEBHOOK_ENABLED:true}
-    secret: ${JIRA_WEBHOOK_SECRET:}
-    # STATUS | STATUS_CATEGORY | DONE_ONLY | STATUS_AND_ASSIGNEE
-    notify-on: ${JIRA_WEBHOOK_NOTIFY_ON:STATUS_AND_ASSIGNEE}
   # STUDY: Story Point 커스텀 필드 ID. Jira 사이트마다 다르다 (관리자 > 커스텀 필드에서 확인).
   story-point-field: ${JIRA_SP_FIELD:customfield_10036}
   issue-types:
     bug: ${JIRA_ISSUE_TYPE_BUG:Bug}
     task: ${JIRA_ISSUE_TYPE_TASK:Task}
     subtask: ${JIRA_ISSUE_TYPE_SUBTASK:Sub-task}
+    epic: ${JIRA_ISSUE_TYPE_EPIC:Epic}
   # Jira → 봇 webhook 수신 설정. secret 이 비어있으면 모든 요청 403.
   webhook:
     enabled: ${JIRA_WEBHOOK_ENABLED:true}
@@ -67,13 +78,24 @@ jira:
     # STATUS | STATUS_CATEGORY | DONE_ONLY | STATUS_AND_ASSIGNEE
     notify-on: ${JIRA_WEBHOOK_NOTIFY_ON:STATUS_AND_ASSIGNEE}
 
-# 봇 응답 메시지의 알림 정책.
-notify:
-  # MENTION (기본) — <@USER> 형식으로 Slack 알림 발송
-  # PLAIN          — displayName 평문만 표기 (알림 X)
-  mention: ${NOTIFY_MENTION:MENTION}
-  # 같은 이슈의 연속 알림 최소 간격. 0 = 비활성 (§C 단계에서 의미 부여 예정)
-  min-interval-seconds: ${NOTIFY_MIN_INTERVAL_SECONDS:0}
+# GitHub 브랜치 생성 — "진행 중" 전환 시 Slack repo 버튼 → 선택 repo에 브랜치 생성.
+# token 이 비어 있으면 기능 비활성(앱 기동 영향 없음, 기존 Jira UI 힌트로 폴백).
+github:
+  token: ${GITHUB_BRANCH_TOKEN:}
+  org: ${GITHUB_ORG:CryptoLabInc}
+  # 콤마 구분 → List 바인딩. 버튼으로 띄울 repo (org 하위 이름만).
+  branch-repos: ${GITHUB_BRANCH_REPOS:envector-msa,evi}
+  api-base-url: ${GITHUB_API_BASE_URL:https://api.github.com}
+
+# Notion 연동 — 버그 해결 기록(resolution-db) + 버그 현황(status-db).
+# token 이 비어 있으면 기능 비활성(앱 기동에는 영향 없음).
+notion:
+  enabled: ${NOTION_ENABLED:true}
+  token: ${NOTION_TOKEN:}
+  version: ${NOTION_VERSION:2022-06-28}
+  parent-page-id: ${NOTION_PARENT_PAGE_ID:}
+  resolution-db-id: ${NOTION_DATABASE_ID:}
+  status-db-id: ${NOTION_STATUS_DB_ID:}
 
 # 봇 응답 메시지의 알림 정책.
 notify:
@@ -83,12 +105,21 @@ notify:
   # 같은 이슈의 연속 알림 최소 간격. 0 = 비활성 (§C 단계에서 의미 부여 예정)
   min-interval-seconds: ${NOTIFY_MIN_INTERVAL_SECONDS:0}
 
+# 대시보드 기능요청 게시판 — 새 글 등록 시 DM 받을 관리자 Slack user ID (비우면 DM 생략).
+feature-request:
+  notify-slack-user: ${FEATURE_REQUEST_NOTIFY_USER:}
 # 일일 리마인더 — 사용자별 opt-in 은 Slack 명령 `@봇더지라 리마인더 on` 으로 처리.
 # enabled 는 전역 비상 차단용. 기본 true, 평소 손대지 않는다.
 reminder:
   enabled: ${REMINDER_ENABLED:true}
+  # 일일 리마인더(현재 스프린트 미해결) — 평일 09:00 KST. 단, 격주 전체 리마인더가 나가는 월요일엔 생략된다.
   cron: ${REMINDER_CRON:0 0 9 * * MON-FRI}
   zone: ${REMINDER_ZONE:Asia/Seoul}
+  # 격주 전체 리마인더(미해결 전체) — 매주 월 09:30 점화, anchor 기준 짝수 주차 월요일에만 실제 발송.
+  biweekly-cron: ${REMINDER_BIWEEKLY_CRON:0 30 9 * * MON}
+  biweekly-anchor: ${REMINDER_BIWEEKLY_ANCHOR:2026-06-22}
+  # 일일 리마인더에서 "진행 중" 으로 이 일수 이상 정체된 이슈를 ⚠️ 로 태그(진입 시각 기준).
+  stale-days: ${REMINDER_STALE_DAYS:7}
 
 # STUDY: Actuator. /actuator/health = 헬스체크. Phase 1에서는 별도 /health 컨트롤러도 제공.
 management:
@@ -97,7 +128,9 @@ management:
       exposure:
         include: health,info
 
+# STUDY: 운영 기본 INFO — DEBUG 는 Slack/Jira 페이로드까지 찍어 로그가 비대해진다.
+#        트러블슈팅 시 LOG_LEVEL_APP=DEBUG 만 바꿔 재시작.
 logging:
   level:
-    com.jirabot.slack: DEBUG
-    org.springframework.security: DEBUG
+    com.jirabot.slack: ${LOG_LEVEL_APP:INFO}
+    org.springframework.security: ${LOG_LEVEL_SECURITY:WARN}

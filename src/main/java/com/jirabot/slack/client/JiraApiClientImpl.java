@@ -39,7 +39,7 @@ public class JiraApiClientImpl implements JiraApiClient {
         this.jiraWebClient = jiraWebClient;
         this.props = props;
         this.objectMapper = objectMapper;
-        this.sprintFields = "summary,status,assignee,issuetype,parent," + props.storyPointField() + ",created,updated";
+        this.sprintFields = "summary,status,assignee,reporter,issuetype,parent," + props.storyPointField() + ",created,updated,resolutiondate,statuscategorychangedate";
     }
 
     @Override
@@ -80,19 +80,30 @@ public class JiraApiClientImpl implements JiraApiClient {
     //        Map으로 빌드하면 동적 필드명을 자유롭게 추가할 수 있다.
     private Map<String, Object> buildRequest(IssueClassification c, String reporterName,
                                              String jiraAccountId) {
-        String issueTypeName = c.type() == IssueClassification.IssueType.BUG
-                ? props.issueTypes().bug() : props.issueTypes().task();
-        List<String> labels = List.of("slackbot", "origin-slack", "sp-" + c.storyPoint(),
-                "claude-" + c.type().name().toLowerCase());
+        // STUDY: 이슈 타입명은 분류에 따라 매핑. EPIC 은 키워드 트리거로만 강제되는 특이 케이스.
+        String issueTypeName = switch (c.type()) {
+            case BUG -> props.issueTypes().bug();
+            case EPIC -> props.issueTypes().epic();
+            default -> props.issueTypes().task();
+        };
+        boolean isEpic = c.type() == IssueClassification.IssueType.EPIC;
 
-        Map<String, Object> fields = new java.util.HashMap<>(Map.of(
-                "project", Map.of("key", props.projectKey()),
-                "summary", c.title(),
-                "issuetype", Map.of("name", issueTypeName),
-                "description", buildAdfDescription(c, reporterName),
-                "labels", labels,
-                props.storyPointField(), (double) c.storyPoint()
-        ));
+        List<String> labels = new java.util.ArrayList<>(List.of(
+                "slackbot", "origin-slack", "claude-" + c.type().name().toLowerCase()));
+
+        Map<String, Object> fields = new java.util.HashMap<>();
+        fields.put("project", Map.of("key", props.projectKey()));
+        fields.put("summary", c.title());
+        fields.put("issuetype", Map.of("name", issueTypeName));
+        fields.put("description", buildAdfDescription(c, reporterName));
+        // STUDY: 에픽은 컨테이너성 이슈라 Story Point 를 부여하지 않는다. 일부 Jira 설정은
+        //        에픽에 SP 커스텀 필드 설정 자체를 거부하므로 필드/라벨 모두 생략한다.
+        if (!isEpic) {
+            labels.add("sp-" + c.storyPoint());
+            fields.put(props.storyPointField(), (double) c.storyPoint());
+        }
+        fields.put("labels", labels);
+
         // STUDY: reporter/assignee는 Jira accountId로 지정. null이면 API 토큰 소유자가 기본값.
         if (jiraAccountId != null) {
             Map<String, String> accountRef = Map.of("accountId", jiraAccountId);
@@ -123,7 +134,12 @@ public class JiraApiClientImpl implements JiraApiClient {
         }
     }
 
+    // STUDY: @Cacheable — 호출마다 Jira 왕복 2회(보드+스프린트)를 5분 TTL 캐시(CacheConfig)로 흡수.
+    //        스프린트는 2주 주기로 바뀌므로 5분 staleness 는 무해. Optional 자체가 캐시되므로
+    //        "활성 스프린트 없음"(empty) 도 5분간 재조회하지 않는다.
+    //        주의: 같은 클래스 내부 호출(self-invocation)은 프록시를 우회해 캐시를 타지 않는다.
     @Override
+    @org.springframework.cache.annotation.Cacheable(com.jirabot.slack.config.CacheConfig.ACTIVE_SPRINT_CACHE)
     public Optional<SprintInfo> getActiveSprint() {
         try {
             // STUDY: Jira Agile API로 프로젝트의 보드를 찾고, 활성 스프린트를 조회한다.
@@ -237,6 +253,7 @@ public class JiraApiClientImpl implements JiraApiClient {
     private SprintIssue parseSprintIssue(JsonNode issue) {
         JsonNode f = issue.path("fields");
         JsonNode assignee = f.path("assignee");
+        JsonNode reporter = f.path("reporter");
         // STUDY: 하위 작업은 fields.parent.key 가 채워져 있다. parent 가 없는 일반 이슈는 null.
         JsonNode parent = f.path("parent");
         String parentKey = parent.isMissingNode() || parent.isNull() ? null : parent.path("key").asText(null);
@@ -246,12 +263,90 @@ public class JiraApiClientImpl implements JiraApiClient {
                 f.path("status").path("name").asText(),
                 f.path("status").path("statusCategory").path("name").asText(),
                 assignee.isMissingNode() || assignee.isNull() ? null : assignee.path("displayName").asText(),
+                reporter.isMissingNode() || reporter.isNull() ? null : reporter.path("displayName").asText(),
                 f.path("issuetype").path("name").asText(),
                 f.path("issuetype").path("subtask").asBoolean(false),
                 f.path(props.storyPointField()).asDouble(0),
                 parentKey,
                 f.path("created").asText(""),
-                f.path("updated").asText(""));
+                f.path("updated").asText(""),
+                // STUDY: 이 사이트는 done 이슈에 resolutiondate 를 안 채우는 경우가 많아,
+                //        "완료 시각" 으로 statuscategorychangedate(Done 카테고리 진입 시각)를 폴백으로 쓴다.
+                firstNonBlankDate(f.path("resolutiondate"), f.path("statuscategorychangedate")));
+    }
+
+    private static String firstNonBlankDate(JsonNode... nodes) {
+        for (JsonNode n : nodes) {
+            if (n != null && !n.isMissingNode() && !n.isNull()) {
+                String v = n.asText(null);
+                if (v != null && !v.isBlank()) return v;
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public boolean issueExists(String issueKey) {
+        try {
+            jiraWebClient.get()
+                    .uri("/rest/api/3/issue/{key}?fields=key", issueKey)
+                    .retrieve().bodyToMono(String.class).block();
+            return true;
+        } catch (WebClientResponseException e) {
+            if (e.getStatusCode().value() == 404) {
+                return false;  // 삭제됨
+            }
+            // 불확실(권한/5xx 등) → 오삭제 방지 위해 존재로 간주.
+            log.warn("issueExists {} unexpected {} — treating as exists", issueKey, e.getStatusCode());
+            return true;
+        } catch (Exception e) {
+            log.warn("issueExists {} error: {} — treating as exists", issueKey, e.toString());
+            return true;
+        }
+    }
+
+    @Override
+    public Optional<SprintIssue> getIssue(String issueKey) {
+        try {
+            // STUDY: sync 와 동일한 필드 집합으로 단건 조회 — parseSprintIssue 를 그대로 재사용한다.
+            String json = jiraWebClient.get()
+                    .uri("/rest/api/3/issue/{key}?fields={fields}", issueKey, sprintFields)
+                    .retrieve().bodyToMono(String.class).block();
+            return Optional.of(parseSprintIssue(objectMapper.readTree(json)));
+        } catch (WebClientResponseException e) {
+            if (e.getStatusCode().value() == 404) {
+                log.info("getIssue {}: not found (404)", issueKey);
+            } else {
+                log.warn("getIssue {} failed: {}", issueKey, e.getStatusCode());
+            }
+            return Optional.empty();
+        } catch (Exception e) {
+            log.warn("getIssue {} error: {}", issueKey, e.toString());
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public boolean assignIssue(String issueKey, String accountId) {
+        try {
+            // STUDY: PUT /issue/{key}/assignee — body 의 accountId 가 null 이면 담당자 해제.
+            //        성공 시 204 No Content (본문 없음) → bodyToMono(Void.class) 대신 toBodilessEntity.
+            java.util.Map<String, String> body = new java.util.HashMap<>();
+            body.put("accountId", accountId);
+            jiraWebClient.put()
+                    .uri("/rest/api/3/issue/{key}/assignee", issueKey)
+                    .bodyValue(body)
+                    .retrieve().toBodilessEntity().block();
+            log.info("Assigned {} to accountId={}", issueKey, accountId);
+            return true;
+        } catch (WebClientResponseException e) {
+            log.warn("assignIssue {} failed: {} body={}", issueKey, e.getStatusCode(),
+                    e.getResponseBodyAsString());
+            return false;
+        } catch (Exception e) {
+            log.warn("assignIssue {} error: {}", issueKey, e.toString());
+            return false;
+        }
     }
 
     @Override
@@ -262,20 +357,32 @@ public class JiraApiClientImpl implements JiraApiClient {
             String json = jiraWebClient.get()
                     .uri("/rest/api/3/issue/{key}/transitions", issueKey)
                     .retrieve().bodyToMono(String.class).block();
-            JsonNode transitions = objectMapper.readTree(json).path("transitions");
+            JsonNode root = objectMapper.readTree(json);
+            JsonNode transitions = root.path("transitions");
+
+            // STUDY: transition API가 에러를 반환하면 transitions 키가 없어 빈 노드가 된다.
+            //        이 경우 로그에 응답 본문을 남겨 원인 파악을 돕는다.
+            if (transitions.isMissingNode() || !transitions.isArray()) {
+                log.warn("Transition API returned no transitions for {}: {}", issueKey, json);
+                return false;
+            }
 
             // STUDY: transition name은 프로젝트마다 다르지만 (예: "Start to Work", "진행 중"),
             //        target status name은 프로젝트 내에서 일관적이다 (예: "진행 중").
             //        t.to.name으로 매칭하면 transition 이름에 의존하지 않아 범용적.
             String transitionId = null;
             for (JsonNode t : transitions) {
-                if (targetStatusName.equals(t.path("to").path("name").asText())) {
+                String toName = t.path("to").path("name").asText();
+                log.debug("Available transition: id={} name='{}' to.name='{}'",
+                        t.path("id").asText(), t.path("name").asText(), toName);
+                if (targetStatusName.equals(toName)) {
                     transitionId = t.path("id").asText();
                     break;
                 }
             }
             if (transitionId == null) {
-                log.warn("Transition '{}' not found for issue {}", targetStatusName, issueKey);
+                log.warn("Transition '{}' not found for issue {}. Available: {}",
+                        targetStatusName, issueKey, transitions);
                 return false;
             }
 
@@ -466,6 +573,10 @@ public class JiraApiClientImpl implements JiraApiClient {
     // STUDY: Jira v3 description은 ADF(Atlassian Document Format) JSON. 최소 구조로 paragraph + codeBlock.
     private Map<String, Object> buildAdfDescription(IssueClassification c, String reporter) {
         String reporterText = "Reported by @" + (reporter == null ? "unknown" : reporter) + " via Slack";
+        // STUDY: 에픽은 SP 가 없으므로 푸터에 SP 를 표기하지 않는다.
+        String classifiedText = c.type() == IssueClassification.IssueType.EPIC
+                ? "Classified as EPIC"
+                : "Classified as " + c.type() + " · Story Point " + c.storyPoint();
         return Map.of(
                 "version", 1,
                 "type", "doc",
@@ -475,7 +586,86 @@ public class JiraApiClientImpl implements JiraApiClient {
                         Map.of("type", "paragraph", "content", List.of(
                                 Map.of("type", "text", "text", c.summary() == null ? "" : c.summary()))),
                         Map.of("type", "paragraph", "content", List.of(
-                                Map.of("type", "text", "text",
-                                        "Classified as " + c.type() + " · Story Point " + c.storyPoint())))));
+                                Map.of("type", "text", "text", classifiedText)))));
+    }
+
+    // STUDY: 새 Jira Cloud 검색 엔드포인트 /rest/api/3/search/jql 사용(구 /search 는 deprecated).
+    //        nextPageToken 기반 페이지네이션. guard 로 무한 루프 방지(최대 50페이지).
+    @Override
+    public List<SprintIssue> searchByJql(String jql) {
+        List<SprintIssue> result = new ArrayList<>();
+        String nextToken = null;
+        int guard = 0;
+        try {
+            do {
+                final String token = nextToken;
+                String json = jiraWebClient.get()
+                        .uri(uri -> {
+                            uri.path("/rest/api/3/search/jql")
+                                    .queryParam("jql", jql)
+                                    .queryParam("fields", sprintFields)
+                                    .queryParam("maxResults", 100);
+                            if (token != null) {
+                                uri.queryParam("nextPageToken", token);
+                            }
+                            return uri.build();
+                        })
+                        .retrieve().bodyToMono(String.class).block();
+                JsonNode root = objectMapper.readTree(json);
+                for (JsonNode issue : root.path("issues")) {
+                    result.add(parseSprintIssue(issue));
+                }
+                JsonNode tokenNode = root.path("nextPageToken");
+                nextToken = (tokenNode.isMissingNode() || tokenNode.isNull()) ? null : tokenNode.asText(null);
+                guard++;
+            } while (nextToken != null && guard < 50);
+            log.info("JQL search returned {} issues for '{}'", result.size(), jql);
+        } catch (Exception e) {
+            log.error("JQL search failed '{}': {}", jql, e.toString());
+        }
+        return result;
+    }
+
+    @Override
+    public List<String> getComments(String issueKey) {
+        List<String> out = new ArrayList<>();
+        try {
+            String json = jiraWebClient.get()
+                    .uri("/rest/api/3/issue/{key}/comment?maxResults=50&orderBy=created", issueKey)
+                    .retrieve().bodyToMono(String.class).block();
+            JsonNode comments = objectMapper.readTree(json).path("comments");
+            for (JsonNode c : comments) {
+                String text = extractAdfText(c.path("body"));
+                if (!text.isEmpty()) {
+                    out.add(text);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch comments for {}: {}", issueKey, e.toString());
+        }
+        return out;
+    }
+
+    // STUDY: Atlassian Document Format(ADF) 은 중첩 content 트리. text 노드만 재귀 수집해 평문화한다.
+    private static String extractAdfText(JsonNode node) {
+        StringBuilder sb = new StringBuilder();
+        collectAdfText(node, sb);
+        return sb.toString().replaceAll("\\s+", " ").strip();
+    }
+
+    private static void collectAdfText(JsonNode node, StringBuilder sb) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return;
+        }
+        JsonNode text = node.path("text");
+        if (text.isTextual()) {
+            sb.append(text.asText()).append(' ');
+        }
+        JsonNode content = node.path("content");
+        if (content.isArray()) {
+            for (JsonNode child : content) {
+                collectAdfText(child, sb);
+            }
+        }
     }
 }

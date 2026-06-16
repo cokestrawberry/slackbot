@@ -101,12 +101,13 @@ public class SprintReportServiceImpl implements SprintReportService {
             // STUDY: 내 이슈를 찾는 2가지 경로:
             //        1. assignee가 내 Jira 이름인 이슈 (Jira에서 배정된 것)
             //        2. reporter가 내 Slack ID인 이슈 (봇으로 생성한 것)
+            //        기존 findAll() 전체 로드 + Java 필터를 DB 쿼리(findMyIssues)로 대체 — 이슈가 늘어도
+            //        메모리/지연이 일정하다. 매칭 의미(정확 일치 + contains)는 쿼리에 그대로 보존.
             String jiraName = resolveJiraName(slackUserId);
 
-            List<IssueEntity> allIssues = issueRepository.findAll();
-            List<IssueEntity> myIssues = allIssues.stream()
-                    .filter(i -> isMyIssue(i, slackUserId, jiraName))
-                    .toList();
+            List<IssueEntity> myIssues = (jiraName == null || jiraName.isBlank())
+                    ? issueRepository.findByReporter(slackUserId)
+                    : issueRepository.findMyIssues(slackUserId, jiraName);
 
             if (myIssues.isEmpty()) {
                 String nameInfo = jiraName != null ? " (" + jiraName + ")" : "";
@@ -388,7 +389,7 @@ public class SprintReportServiceImpl implements SprintReportService {
                     indent, issueLink(i.getIssueKey()), i.getSummary(), spText(i.getStoryPoint())));
             for (IssueEntity child : items) {
                 if (i.getIssueKey().equals(child.getParentKey())) {
-                    sb.append(String.format("%s  - %s %s%s\n",
+                    sb.append(String.format("%s    ◦ %s %s%s\n",
                             indent, issueLink(child.getIssueKey()), child.getSummary(),
                             spText(child.getStoryPoint())));
                 }
@@ -543,19 +544,6 @@ public class SprintReportServiceImpl implements SprintReportService {
         }
 
         return null;
-    }
-
-    private boolean isMyIssue(IssueEntity issue, String slackUserId, String jiraName) {
-        // reporter가 Slack ID와 일치 (봇으로 생성한 이슈)
-        if (slackUserId != null && slackUserId.equals(issue.getReporter())) {
-            return true;
-        }
-        // assignee가 Jira displayName과 일치 (Jira에서 배정된 이슈)
-        if (jiraName != null && issue.getAssignee() != null
-                && issue.getAssignee().contains(jiraName)) {
-            return true;
-        }
-        return false;
     }
 
     private String spText(Double sp) {

@@ -22,8 +22,96 @@ public final class BlockKitBuilder {
     public static final String ACTION_IN_REVIEW = "jira_transition_in_review";
     public static final String ACTION_DONE = "jira_transition_done";
     public static final String ACTION_QUICK_DONE = "jira_quick_done";
+    public static final String ACTION_CREATE_BRANCH = "jira_create_branch";
 
     private BlockKitBuilder() {}
+
+    /**
+     * "진행 중" 전환 후 브랜치를 만들 repo 선택 버튼 블록을 생성한다.
+     * Section(권장 브랜치명) + Actions(repo 버튼들). 버튼 value = "issueKey|repo|branch"
+     * (issueKey/repo/슬러그에 '|' 가 없으므로 클릭 시 앞 2개 '|' 로 안전하게 분리).
+     */
+    public static String buildBranchRepoButtons(String issueKey, String branchName, List<String> repos) {
+        ArrayNode blocks = MAPPER.createArrayNode();
+        blocks.add(buildMrkdwnSection(
+                ":herb: *브랜치 만들기* — 어느 repo에 만들까요?\n권장 브랜치명: `" + branchName + "`"));
+
+        ArrayNode elements = MAPPER.createArrayNode();
+        // STUDY: Slack 은 한 메시지 내 모든 버튼의 action_id 가 유일해야 한다(중복이면 invalid_blocks).
+        //        repo 별로 인덱스를 붙여 고유화하되, 라우팅은 ACTION_CREATE_BRANCH prefix 로 판별한다.
+        int i = 0;
+        for (String repo : repos) {
+            elements.add(buildButton(repo, ACTION_CREATE_BRANCH + "_" + i++,
+                    issueKey + "|" + repo + "|" + branchName, null, null));
+        }
+        ObjectNode actions = MAPPER.createObjectNode();
+        actions.put("type", "actions");
+        actions.set("elements", elements);
+        blocks.add(actions);
+
+        return serialize(blocks);
+    }
+
+    /**
+     * 이슈 키 조회 카드 Block Kit JSON 을 생성한다 (공식 Jira-Slack 앱의 /jira KEY 카드 대응).
+     * Section(제목+링크) + Section(fields 2열: 유형/상태/담당자/보고자/SP/스프린트)
+     * + [Section(설명 일부)] + 상태별 다음 단계 버튼(완료 이슈는 버튼 없음).
+     * 버튼은 기존 전환 action_id 재사용 — SlackInteractionController.handleTransition 이 그대로 처리한다.
+     *
+     * @param statusCategory 한국어 상태 카테고리 ("해야 할 일"/"진행 중"/"완료"), 그 외/null 은 버튼 없음
+     */
+    public static String buildIssueCardBlocks(String key, String url, String summary,
+                                              String issueType, String status, String statusCategory,
+                                              String assignee, String reporter,
+                                              Double storyPoint, String sprintName,
+                                              String description) {
+        ArrayNode blocks = MAPPER.createArrayNode();
+
+        blocks.add(buildMrkdwnSection(String.format(":card_index: *<%s|[%s] %s>*", url, key, summary)));
+
+        // STUDY: section.fields — Slack 이 2열 그리드로 렌더링한다 (최대 10개).
+        ObjectNode fieldsSection = MAPPER.createObjectNode();
+        fieldsSection.put("type", "section");
+        ArrayNode fields = MAPPER.createArrayNode();
+        fields.add(mrkdwnText("*유형*\n" + orDash(issueType)));
+        fields.add(mrkdwnText("*상태*\n" + orDash(status)));
+        fields.add(mrkdwnText("*담당자*\n" + orDash(assignee)));
+        fields.add(mrkdwnText("*보고자*\n" + orDash(reporter)));
+        fields.add(mrkdwnText("*Story Point*\n"
+                + (storyPoint == null || storyPoint == 0 ? "-" : String.valueOf(storyPoint.intValue()))));
+        fields.add(mrkdwnText("*스프린트*\n" + orDash(sprintName)));
+        fieldsSection.set("fields", fields);
+        blocks.add(fieldsSection);
+
+        if (description != null && !description.isBlank()) {
+            String snippet = description.length() > 200 ? description.substring(0, 200) + "…" : description;
+            blocks.add(buildMrkdwnSection("*설명*\n" + snippet));
+        }
+
+        // 상태 카테고리에 맞는 다음 단계 버튼 (완료/미상은 버튼 없음)
+        ArrayNode elements = MAPPER.createArrayNode();
+        if ("해야 할 일".equals(statusCategory)) {
+            elements.add(buildButton("🔨 진행 중", ACTION_IN_PROGRESS, key, null, null));
+            elements.add(buildButton("⚡ 바로 완료", ACTION_QUICK_DONE, key, "primary",
+                    buildConfirm("확인", "해야 할 일 → 진행 중 → 완료를 한번에 처리합니다. 계속하시겠습니까?", "실행", "취소")));
+        } else if ("진행 중".equals(statusCategory)) {
+            elements.add(buildButton("🔍 검토 중", ACTION_IN_REVIEW, key, null, null));
+            elements.add(buildButton("✅ 완료", ACTION_DONE, key, "primary",
+                    buildConfirm("확인", "정말 완료 처리하시겠습니까?", "완료", "취소")));
+        }
+        if (!elements.isEmpty()) {
+            ObjectNode actions = MAPPER.createObjectNode();
+            actions.put("type", "actions");
+            actions.set("elements", elements);
+            blocks.add(actions);
+        }
+
+        return serialize(blocks);
+    }
+
+    private static String orDash(String value) {
+        return (value == null || value.isBlank()) ? "-" : value;
+    }
 
     /**
      * 이슈 생성 완료 메시지용 Block Kit JSON을 생성한다.
@@ -32,6 +120,15 @@ public final class BlockKitBuilder {
     public static String buildIssueCreatedBlocks(String key, String url,
                                                   IssueClassification classification,
                                                   List<IssueEntity> similar) {
+        return buildIssueCreatedBlocks(key, url, classification, similar, -1);
+    }
+
+    /**
+     * @param elapsedMs Slack 메시지 수신부터의 응답 소요시간(ms). 0 이하면 표기 생략.
+     */
+    public static String buildIssueCreatedBlocks(String key, String url,
+                                                  IssueClassification classification,
+                                                  List<IssueEntity> similar, long elapsedMs) {
         ArrayNode blocks = MAPPER.createArrayNode();
 
         // Section: 이슈 정보
@@ -76,7 +173,67 @@ public final class BlockKitBuilder {
         actions.set("elements", elements);
         blocks.add(actions);
 
+        appendElapsedContext(blocks, elapsedMs);
+
         return serialize(blocks);
+    }
+
+    /**
+     * 에픽 생성 완료 메시지용 Block Kit JSON을 생성한다.
+     * 에픽은 스프린트 워크플로(해야 할 일/진행 중/완료) 대상이 아니므로 액션 버튼 없이
+     * 정보 Section(+유사 이슈 경고)만 표시하여 일반 스토리/버그 알림과 시각적으로 구별한다.
+     */
+    public static String buildEpicCreatedBlocks(String key, String url,
+                                                IssueClassification classification,
+                                                List<IssueEntity> similar) {
+        return buildEpicCreatedBlocks(key, url, classification, similar, -1);
+    }
+
+    /**
+     * @param elapsedMs Slack 메시지 수신부터의 응답 소요시간(ms). 0 이하면 표기 생략.
+     */
+    public static String buildEpicCreatedBlocks(String key, String url,
+                                                IssueClassification classification,
+                                                List<IssueEntity> similar, long elapsedMs) {
+        ArrayNode blocks = MAPPER.createArrayNode();
+
+        String sectionText = String.format(
+                ":bookmark_tabs: *Epic이 생성되었습니다!*\n*<%s|[%s] %s>*\n분류: EPIC",
+                url, key, classification.title());
+        blocks.add(buildMrkdwnSection(sectionText));
+
+        if (similar != null && !similar.isEmpty()) {
+            StringBuilder warning = new StringBuilder(":warning: *유사한 이슈가 존재합니다:*");
+            for (IssueEntity s : similar) {
+                warning.append("\n  • ")
+                        .append(s.getIssueKey())
+                        .append(" ")
+                        .append(s.getSummary())
+                        .append(" (")
+                        .append(s.getStatus())
+                        .append(")");
+            }
+            warning.append("\n중복이라면 새 이슈를 닫아주세요.");
+            blocks.add(buildMrkdwnSection(warning.toString()));
+        }
+
+        appendElapsedContext(blocks, elapsedMs);
+
+        return serialize(blocks);
+    }
+
+    // STUDY: context 블록 — section 보다 작은 회색 보조 텍스트로 렌더링된다.
+    //        응답 소요시간을 메시지 맨 끝에 표기 (원인 파악/최적화용, response_metrics 와 동일 기준).
+    private static void appendElapsedContext(ArrayNode blocks, long elapsedMs) {
+        if (elapsedMs <= 0) {
+            return;
+        }
+        ObjectNode context = MAPPER.createObjectNode();
+        context.put("type", "context");
+        ArrayNode elements = MAPPER.createArrayNode();
+        elements.add(mrkdwnText(String.format(":stopwatch: 응답 시간 %.1f초", elapsedMs / 1000.0)));
+        context.set("elements", elements);
+        blocks.add(context);
     }
 
     /**

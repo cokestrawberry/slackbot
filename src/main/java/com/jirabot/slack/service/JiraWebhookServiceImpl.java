@@ -46,6 +46,7 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
     private final NotifyProperties notifyProps;
     private final JiraProperties jiraProps;
     private final JiraStatusCategoryResolver resolver;
+    private final BugNotionService bugNotionService;
 
     public JiraWebhookServiceImpl(ObjectMapper objectMapper,
                                   IssueRepository issueRepository,
@@ -55,7 +56,8 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
                                   JiraWebhookProperties webhookProps,
                                   NotifyProperties notifyProps,
                                   JiraProperties jiraProps,
-                                  JiraStatusCategoryResolver resolver) {
+                                  JiraStatusCategoryResolver resolver,
+                                  BugNotionService bugNotionService) {
         this.objectMapper = objectMapper;
         this.issueRepository = issueRepository;
         this.userMappingRepository = userMappingRepository;
@@ -65,6 +67,7 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
         this.notifyProps = notifyProps;
         this.jiraProps = jiraProps;
         this.resolver = resolver;
+        this.bugNotionService = bugNotionService;
     }
 
     @Override
@@ -96,19 +99,24 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
                 return;
             }
 
+            List<JiraChangelog> items = parseChangelogItems(root.path("changelog").path("items"));
+            if (items.isEmpty()) {
+                return;
+            }
+
+            // STUDY: 개인 할당 DM 은 봇 생성(스레드 보유) 이슈 여부와 무관하게 발송해야 하므로
+            //        로컬 추적/스레드 가드보다 먼저 처리한다 (공식 앱의 personal notifications 대응).
+            //        실패해도 스레드 알림 흐름을 깨지 않도록 내부에서 예외를 흡수한다.
+            notifyAssigneeDm(root, issueKey, items);
+
             Optional<IssueEntity> found = issueRepository.findByIssueKey(issueKey);
             if (found.isEmpty()) {
-                log.debug("Webhook ignored: issue {} not tracked locally", issueKey);
+                log.debug("Webhook thread-notify skipped: issue {} not tracked locally", issueKey);
                 return;
             }
             IssueEntity issue = found.get();
             if (issue.getSlackChannel() == null || issue.getSlackThreadTs() == null) {
-                log.debug("Webhook ignored: issue {} has no Slack thread", issueKey);
-                return;
-            }
-
-            List<JiraChangelog> items = parseChangelogItems(root.path("changelog").path("items"));
-            if (items.isEmpty()) {
+                log.debug("Webhook thread-notify skipped: issue {} has no Slack thread", issueKey);
                 return;
             }
 
@@ -119,6 +127,10 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
                 slackNotifier.postThreadReply(issue.getSlackChannel(), issue.getSlackThreadTs(), message);
                 applyIssueUpdate(root, issue);
                 log.info("Webhook notified key={} changelogId={}", issueKey, changelogId);
+
+                // STUDY: 버그의 상태 변경이면 Notion 현황 DB 를 동기화하고, 완료로 전환된 경우 해결 기록 DB 도 적재한다.
+                //        Notion 비활성/실패는 enabled() 가드 + 내부 try-catch 로 본 흐름을 깨지 않는다.
+                syncNotionIfBug(issue, items);
             } else {
                 log.debug("Webhook below threshold notify-on={} items={}", webhookProps.notifyOn(), items.size());
             }
@@ -137,9 +149,61 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
             items.add(new JiraChangelog(
                     item.path("field").asText(""),
                     item.path("fromString").isNull() ? null : item.path("fromString").asText(null),
-                    item.path("toString").isNull() ? null : item.path("toString").asText(null)));
+                    item.path("toString").isNull() ? null : item.path("toString").asText(null),
+                    item.path("to").isNull() ? null : item.path("to").asText(null)));
         }
         return items;
+    }
+
+    // STUDY: Jira 에서 이슈가 누군가에게 할당되면 그 사람에게 DM 발송.
+    //        조건: assignee 변경 항목 존재 && 새 담당자 매핑 등록됨 && assignDmEnabled && 셀프할당 아님.
+    //        봇의 `할당` 명령으로 바꿔도 Jira webhook 이 돌아와 같은 경로로 DM — 알림 경로 일원화.
+    void notifyAssigneeDm(JsonNode root, String issueKey, List<JiraChangelog> items) {
+        try {
+            JiraChangelog assigneeItem = items.stream()
+                    .filter(i -> "assignee".equals(i.field())).findFirst().orElse(null);
+            if (assigneeItem == null || (assigneeItem.toId() == null && assigneeItem.toValue() == null)) {
+                return; // 할당 변경 아님 또는 담당자 해제
+            }
+
+            // 매핑 조회 — accountId 우선, displayName 폴백 (L4: 저장된 식별자가 진실).
+            Optional<UserMappingEntity> mapping = Optional.empty();
+            if (assigneeItem.toId() != null && !assigneeItem.toId().isBlank()) {
+                mapping = userMappingRepository.findByJiraAccountId(assigneeItem.toId());
+            }
+            if (mapping.isEmpty() && assigneeItem.toValue() != null && !assigneeItem.toValue().isBlank()) {
+                mapping = userMappingRepository.findByJiraDisplayName(assigneeItem.toValue());
+            }
+            // STUDY: 여기부터는 "할당 변경이 실제 감지된" 경우라 빈도가 낮다 — skip 사유를 INFO 로 남겨
+            //        "알림이 안 왔어요" 문의를 로그만으로 진단할 수 있게 한다.
+            if (mapping.isEmpty()) {
+                log.info("Assign DM skipped key={}: no mapping for assignee '{}' (accountId={})",
+                        issueKey, assigneeItem.toValue(), assigneeItem.toId());
+                return;
+            }
+            if (!mapping.get().isAssignDmEnabled()) {
+                log.info("Assign DM skipped key={}: disabled for {}", issueKey, mapping.get().getSlackUserId());
+                return;
+            }
+
+            // 셀프할당(변경자 본인에게 할당)은 DM 생략 — 본인이 한 행동이라 알림 가치가 없다.
+            String actorAccountId = root.path("user").path("accountId").asText(null);
+            if (actorAccountId != null && actorAccountId.equals(assigneeItem.toId())) {
+                log.info("Assign DM skipped key={}: self-assignment by {}", issueKey, actorAccountId);
+                return;
+            }
+
+            String summary = root.path("issue").path("fields").path("summary").asText("");
+            String actorDisplay = root.path("user").path("displayName").asText(null);
+            String actor = (actorDisplay == null || actorDisplay.isBlank()) ? "자동화/시스템" : actorDisplay;
+            String message = String.format(
+                    ":bell: <%s|%s> %s\n회원님에게 할당되었습니다. (변경: %s)\n_알림 끄기: `@지라 할당알림 off`_",
+                    issueLink(issueKey), issueKey, summary, actor);
+            slackNotifier.sendDirectMessage(mapping.get().getSlackUserId(), message);
+            log.info("Assign DM sent key={} to={}", issueKey, mapping.get().getSlackUserId());
+        } catch (Exception e) {
+            log.warn("Assign DM failed key={}: {}", issueKey, e.toString());
+        }
     }
 
     boolean shouldNotify(List<JiraChangelog> items) {
@@ -171,6 +235,33 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
         return false;
     }
 
+    // STUDY: 버그 + 상태 변경일 때만 Notion 동기화. toDone 은 이번 변경에서 "완료 아님 → 완료" 전환인지.
+    private void syncNotionIfBug(IssueEntity issue, List<JiraChangelog> items) {
+        if (!bugNotionService.enabled() || !isBug(issue.getIssueType())) {
+            return;
+        }
+        boolean statusChanged = items.stream().anyMatch(i -> "status".equals(i.field()));
+        if (!statusChanged) {
+            return;
+        }
+        boolean toDone = items.stream().anyMatch(i -> "status".equals(i.field())
+                && resolver.isDone(i.toValue()) && !resolver.isDone(i.fromValue()));
+        try {
+            bugNotionService.syncOnStatusChange(issue, toDone);
+        } catch (Exception e) {
+            log.warn("Notion sync failed key={}: {}", issue.getIssueKey(), e.toString());
+        }
+    }
+
+    private boolean isBug(String issueType) {
+        if (issueType == null) {
+            return false;
+        }
+        String cfg = jiraProps.issueTypes() != null ? jiraProps.issueTypes().bug() : null;
+        return issueType.toLowerCase().contains("버그") || issueType.toLowerCase().contains("bug")
+                || (cfg != null && issueType.equalsIgnoreCase(cfg));
+    }
+
     private String buildMessage(JsonNode root, IssueEntity issue, List<JiraChangelog> items) {
         String issueUrl = issueLink(issue.getIssueKey());
         String summary = root.path("issue").path("fields").path("summary").asText(issue.getSummary());
@@ -196,22 +287,14 @@ public class JiraWebhookServiceImpl implements JiraWebhookService {
         String reporterMention = resolveMention(null, reporterDisplay);
         sb.append("reporter: ").append(reporterMention).append("\n");
 
-        // STUDY: actor 멘션. webhook payload 최상위 user 노드.
-        JsonNode userNode = root.path("user");
-        String actorAccountId = userNode.path("accountId").isMissingNode() ? null : userNode.path("accountId").asText(null);
-        String actorDisplay = userNode.path("displayName").isMissingNode() ? null : userNode.path("displayName").asText(null);
-        if (userNode.isMissingNode() || userNode.isNull() || (actorAccountId == null && actorDisplay == null)) {
-            sb.append("변경자: 자동화/시스템\n");
-        } else {
-            sb.append("변경자: ").append(resolveMention(actorAccountId, actorDisplay)).append("\n");
-        }
+        // STUDY: "변경자" 라인은 제거함. 봇이 일으킨 전환(슬랙 버튼/명령)은 단일 API 토큰으로 호출돼
+        //        webhook actor 가 항상 토큰 소유자로 기록되므로(실제 클릭자와 무관) 오해를 부른다.
+        //        버튼 클릭 시 원본 메시지는 buildTransitionedBlocks 가 실제 클릭자로 이미 갱신한다.
 
-        // STUDY: 신규 담당자 라인. 단, actor 또는 reporter 와 같으면 중복 생략.
+        // STUDY: 신규 담당자 라인. reporter 와 같으면 중복 생략.
         if (assigneeItem != null && assigneeItem.toValue() != null && !assigneeItem.toValue().isBlank()) {
             String newAssignee = assigneeItem.toValue();
-            boolean sameAsActor = newAssignee.equals(actorDisplay);
-            boolean sameAsReporter = newAssignee.equals(reporterDisplay);
-            if (!sameAsActor && !sameAsReporter) {
+            if (!newAssignee.equals(reporterDisplay)) {
                 sb.append("신규 담당자: ").append(resolveMention(null, newAssignee)).append("\n");
             }
         }

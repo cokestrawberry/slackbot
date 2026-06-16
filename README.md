@@ -7,14 +7,193 @@ Slack 채널에서 자연어로 메시지를 보내면 AI가 자동 분류하여
 | 기능 | 설명 |
 |---|---|
 | AI 이슈 자동 생성 | 자연어 → Haiku 의도 분류 → Sonnet 상세화(제목/SP/타입) → Jira 등록 |
+| 에픽 생성 | `에픽`/`epic` 키워드가 포함되면 AI 분류 없이 결정적으로 Epic 생성 (Story Point·워크플로 버튼 없음, 스토리/버그와 구별) |
 | 스프린트 리포트 | 담당자별 진행 상황, SP 집계 |
 | 작업 조회 | 내 작업 / 팀원 작업 조회 |
 | 스레드 액션 | 이슈 스레드에서 하위작업 생성, 댓글 추가, 설명 수정, 완료 처리 |
 | 중복 감지 | 이슈 생성 시 DB에서 유사 이슈 검색 후 경고 |
 | 이슈 검색 | 키워드로 이슈 제목 검색 (모든 상태 포함) |
-| Jira → Slack 알림 | Jira webhook 으로 이슈 상태/담당자 변경 시 원본 Slack 스레드에 자동 댓글 |
+| 이슈 키 조회 카드 | `@지라 ES2-123` → 유형/상태/담당자/보고자/SP/스프린트/설명 카드 + 상태 전환 버튼 (로컬 DB 미보유 시 Jira 라이브 조회 폴백) |
+| 담당자 지정 | `@지라 할당 ES2-123 홍길동`(또는 `@멘션`), 이슈 스레드에서는 `@지라 담당자 홍길동` 단축형 |
+| 개인 할당 DM 알림 | Jira에서 이슈가 본인에게 할당되면 즉시 DM (등록 사용자 대상, 기본 ON, `@지라 할당알림 off` 로 끄기, 셀프할당 제외) |
+| 리마인더 | opt-in 사용자에게 미해결 이슈 DM. **일일**(평일 09:00, 현재 스프린트) + **격주**(월 09:30, 전체 미해결). 소유 기준 = 담당자, 없으면 보고자 |
 | 인터랙티브 버튼 | 이슈 생성 알림에 "진행 중" / "완료" 버튼 → 클릭으로 Jira 상태 전환 |
+| 브랜치 만들기 | "진행 중" 전환 시 **repo 선택 버튼**을 띄워 클릭하면 봇이 GitHub API로 브랜치 직접 생성(브랜치명은 Claude가 한글 요약→영어 슬러그, `feature/`·`bugfix/`). 브랜치명에 이슈키가 있어 Jira 개발 패널에 자동 연결. `github.token` 미설정 시 Jira 개발 패널 링크 안내로 폴백 |
+| Notion 버그 동기화 | 버그 완료 시 원인/해결방법(Claude 요약)을 Notion '버그 해결 기록' DB에 적재. 전체 버그는 '버그 현황' DB에 해결/미해결 구분해 동기화 (`@지라 notion백필`) |
 | 채널 제한 | 허용된 채널에서만 봇 동작 |
+
+### 성능/안정성 (v0.0.21)
+
+- **검색 선행 sync TTL**: 검색 전 freshness 용 Jira sync(2~3초)를 60초 TTL로 게이트 — 연속 검색은 첫 번째만 지연.
+- **활성 스프린트 캐시**: `getActiveSprint()` 를 Caffeine 5분 TTL 캐시로 — 호출마다 Jira 왕복 2회(보드+스프린트) 제거.
+- **fullSync 공유 fetch**: sync 와 삭제-정리(prune)가 sprint/backlog 목록을 1회만 조회 (기존 2배 왕복 제거).
+- **DB 쿼리 최적화**: `내작업`·시맨틱 검색의 `findAll()` 전체 로드 제거(전용 쿼리/상한 150건), 중복 감지 키워드별 N회 LIKE → 1회 조회 + 집계.
+- **인덱스**: `issues(status_category)`, `issues(sprint_id)`, `issues(completed_at)`.
+- **운영 설정**: `show-sql` off, 로깅 INFO(트러블슈팅 시 `LOG_LEVEL_APP=DEBUG`), HikariCP `maximum-pool-size: 15`.
+
+### 웹 대시보드 (v0.0.26, 외부 접근 v0.0.30)
+
+- 사내망/SSH 포워딩: `http://<호스트IP>:8080/dashboard/` (인증 없음)
+- **외부(인터넷)**: `https://<ngrok-domain>/dashboard/` — Go봇이 :8080 으로 리버스 프록시하며
+  **Basic Auth**(`DASHBOARD_USER`/`DASHBOARD_PASSWORD`, 둘 다 설정 시에만 활성)로 보호.
+  화이트리스트 경로만 노출: `/dashboard/`, `/api/dashboard/`, `/api/user-mappings`, `/actuator/health`
+  — 그 외 Spring API 는 터널에서 계속 404.
+
+| 탭 | 내용 |
+|---|---|
+| 개요 | KPI 카드(전체/미해결/진행 중/스프린트 SP 완료율/정체/등록 사용자) + 마지막 동기화 + [지금 동기화] |
+| 스프린트 | 상태 분포 도넛 · 담당자별 미해결 SP · 정체(7일+) 이슈 목록 |
+| 추이 | 주간 생성 vs 해결 라인(4~26주) · 주별 평균 해결 소요시간. **[히스토리 백필]** 버튼으로 Jira 전체 이슈를 1회 적재해 과거 기록 표시 (v0.0.35) |
+| 담당자 부하 | 담당자별 미해결 수/SP/정체 (미배정 포함). **전체 / 현재 스프린트 토글** (v0.0.34) |
+| 버그 | 버그 비율 · 주간 발생 vs 해결 · 미해결 버그 목록 (**전체 / 현재 스프린트 토글**). **해결된 버그**는 펼칠 때만 Jira 라이브 조회(완료일 최신순, 완료 버그 내 검색) — 완료 이슈는 로컬에서 prune 되므로 라이브가 진실. (v0.0.34) |
+| 이슈 목록 | 상태/담당자/유형 필터 + 키워드 검색 (최근 갱신순 200건). **키 헤더 클릭으로 오름/내림 정렬** (v0.0.34) |
+| 사용자 관리 | Slack↔Jira 매핑 등록(accountId·Slack 실명 자동 해석)/삭제, 리마인더·할당알림 토글 |
+| PR 현황 | 설정된 repo 전체의 열린 PR + 작성자 + **연결 Jira 이슈**(브랜치명/제목의 이슈 키로 자동 조인 — 상태·담당자·링크). **레포/작성자 필터 + 생성·갱신일 정렬(↑↓)** (v0.0.31, 클라이언트 필터라 refetch 없음), 생성일 컬럼 표시. 5분 캐시. **토큰에 Pull requests: Read-only 권한 필요** (없으면 탭에 안내 표시) |
+| 봇 상태 | 서버 health · 최근 의도분류 실패 로그 |
+| 기능요청 | 게시판 (v0.0.32) — 누구나 제목/내용/이름으로 요청 등록 → **관리자에게 Slack DM** (`FEATURE_REQUEST_NOTIFY_USER`, 비우면 DM 생략). 구현 후 완료 처리(되돌리기 가능, 완료일 기록). `feature_requests` 테이블(Flyway V3), API `/api/feature-requests` (GET/POST/PATCH) |
+
+API: `/api/dashboard/*` (summary·sprint·trends·workload·bugs·issues·intent-failures·actions/sync),
+`/api/user-mappings` (GET/POST/DELETE/PATCH — POST 는 Jira accountId 자동 해석).
+데이터는 전부 로컬 DB — 새로고침해도 Jira API 호출 없음.
+
+### 스키마 마이그레이션 — Flyway (v0.0.24)
+
+- 스키마는 **`src/main/resources/db/migration/V<N>__*.sql` 마이그레이션으로만 변경**한다. `ddl-auto=validate` 라
+  엔티티만 고치면 기동이 실패한다(의도된 동작 — 조용한 드리프트 차단).
+- 컬럼/테이블 추가 절차: ① `V2__add_xxx.sql` 작성 ② 엔티티 동기 수정 ③ 테스트 ④ 배포(기동 시 자동 적용).
+- 기존 운영 DB 는 `baseline-on-migrate` 로 V1(2026-06-11 스냅샷)이 적용된 것으로 처리됐고,
+  신규(빈) DB 는 V1 부터 실행되어 전체 스키마가 만들어진다 (신규 설치 경로 검증 완료).
+- 테스트(H2)는 Flyway 를 끄고 기존 create-drop 유지 (`application-test.yml`).
+- 백업: 전환 직전 풀 백업 `~/backups/jirabot-pre-flyway-*.dump` (복원: `pg_restore -U jirabot -d jirabot <dump>`).
+
+### Jira 웹훅 수신 경로 (v0.0.23, 등록 완료 v0.0.28)
+
+Jira → ngrok 터널(:3000) → **Go 봇 `/api/jira/webhook` 프록시** → Spring `/api/jira/webhook`.
+ngrok 이 Go 봇만 노출하므로 프록시가 필수다. 등록은 Jira **사이트 관리자**가 설정 → 시스템 → 웹훅에서
+(또는 관리자 토큰으로 `POST /rest/webhooks/1.0/webhook`):
+
+- URL: `https://<ngrok-domain>/api/jira/webhook?token=<JIRA_WEBHOOK_SECRET>`
+- 이벤트: 이슈 → **업데이트됨** (`jira:issue_updated`)
+- JQL 필터: `project = ES2`
+
+**2026-06-12 등록 완료** (`webhooks/1.0/webhook/1`, 관리자 `JIRA_ADMIN_EMAIL` 계정) — 할당 DM·스레드
+상태변경 알림·버그 완료 Notion 자동 동기화 라이브 활성. **ngrok 도메인이 바뀌면 웹훅 URL 재등록 필요.**
+수신/할당 DM 판정(발송·생략 사유)은 INFO 로그로 남는다 (`Jira webhook received`, `Assign DM sent/skipped`).
+
+### 분류 프롬프트 개선 (v0.0.33)
+
+`claude -p`(headless) 분류 호출의 시스템 프롬프트(`prompts/*.md`)를 개선했다. 검증된 사실 기준:
+
+- `--system-prompt-file` 은 시스템 프롬프트를 **대체**(append 아님)하므로 각 파일은 자기완결적이어야 한다.
+- `--bare`(CLAUDE.md/skill/hook 스킵)는 이 호스트의 **구독 인증을 깨므로 사용 불가**(라이브 확인: "Not logged in").
+  따라서 분류 호출마다 프로젝트 컨텍스트가 로드되지만, 시스템 롤은 prompt 파일이 덮어쓴다.
+- `--json-schema` 는 구조화 출력을 **툴 호출**로 처리해 `--max-turns` 를 1 더 소비 → 현재 `max-turns 1/2` 와
+  충돌(`error_max_turns`)하므로 채택하지 않음. 출력 견고성은 파서의 fence-strip 으로 보장.
+- 개선 핵심: 흩어진 disambiguation 을 **우선순위 결정 절차(first-match-wins)**로 재구성, `skip`(봇과의 사회적/내용없는
+  상호작용) vs `unknown`(Jira 무관 잡담·잡지식)의 경계를 명확화, 통계(숫자/집계) vs 스크럼(서술형 진행)의 경계 추가.
+- **회귀 가드**: `IntentClassifierEvalTest`(90케이스, 실제 CLI 호출)로 전후 정확도를 측정.
+  실행: `./gradlew test -Dintent.eval=true --tests "*IntentClassifierEvalTest"`.
+- Story Point 기준을 [docs/story-point-guide.md](docs/story-point-guide.md) 와 정합(1·2·3·5·8, **8이 상한**, 13 출력 금지).
+  `prompts/sonnet-classifier.md` 와 인라인 폴백 `ClaudeApiClientImpl.SYSTEM_PROMPT` 양쪽 정리.
+
+### 터널 경유 대시보드 접근 (v0.0.30)
+
+OCI 서버라 SSH 포워딩 없이는 대시보드를 못 보던 문제 해결 — 기존 ngrok 도메인을 재사용해
+Go봇이 대시보드 경로만 Basic Auth 를 걸어 :8080 으로 프록시한다 (위 "웹 대시보드" 섹션 참고).
+Slack/Jira webhook 경로는 기존과 동일하게 무인증(각자 서명/token 검증).
+
+### 상태변경 알림 '변경자' 라인 제거 (v0.0.37)
+
+웹훅 상태변경 스레드 알림에서 "변경자" 라인을 제거했다. 봇이 일으킨 전환(슬랙 버튼/명령)은 단일 Jira API
+토큰으로 호출돼 webhook actor 가 항상 토큰 소유자로 기록되므로(실제 클릭자와 무관) "변경자: @토큰소유자"가
+오해를 줬다. 버튼 클릭 시 원본 메시지는 `buildTransitionedBlocks` 가 실제 클릭자 이름으로 이미 갱신한다.
+
+### PR 상태별 워크플로 전환 (v0.0.45)
+
+PR-import 가 열린 PR 도 받는다. PR 상태에 따라 전환 목표를 달리한다: **merged → 완료**, **open(ready) → 검토 중**,
+**open(draft) → 진행 중**. 어떤 상태든 현재 스프린트로 이동하고, SP 는 생성→(merge 또는 현재) 영업일로 산정한다.
+완료가 아니면 `completedAt` 미설정(추이에서 미해결로 집계). (`importMergedPr` → `importPr` 로 이름 변경,
+`PullRequestDetail.draft` 추가.)
+
+### 자연어 PR 요청 라우팅 (v0.0.44)
+
+`@지라 <PR URL> 관련 티켓 만들어줘` 처럼 PR URL 이 섞인 자연어가 일반 이슈 생성으로 빠져 문장 전체가 제목이
+되던 문제. 메시지에 GitHub PR URL 이 있으면(unfurl `<url|label>` 포함) `pr ` 명령이 아니어도 PR-import 로
+라우팅한다. URL 은 정규식으로 추출. (PR-import 는 PR 내용을 읽어 분류/제목/요약 생성 + 기간 기반 SP + 현재
+스프린트로 전환.)
+
+### PR 현황 누락 수정 — githubWebClient 버퍼 (v0.0.43)
+
+PR 이 많은 repo(envector-msa, 열린 PR 20개 ≈ 470KB)가 PR 탭에서 통째로 빠지던 버그. githubWebClient 의
+기본 인메모리 버퍼(256KB)를 응답이 넘겨 `DataBufferLimitException` → `listOpenPullRequests` 가 빈 목록 반환
+(에러 아닌 200 OK 라 inaccessible 로도 안 잡힘). 버퍼 8MB 로 상향(jiraWebClient 와 동일, v0.0.34 와 같은 부류).
+
+### Safari 빈 화면 — 캐시 무력화 + 전역 에러 노출 (v0.0.41)
+
+v0.0.40 후에도 Safari 빈 화면이 지속 보고됨. 두 가지 추가 조치: (1) 정적 자산에 버전 쿼리(`app.js?v=…`)로
+**캐시 무력화** — Safari 가 옛 JS 를 들고 있을 가능성 차단. (2) `window.onerror`/`unhandledrejection` +
+초기/탭 로더 catch 를 **화면 상단 빨간 배너로 노출** — 100% JS 렌더라 조용히 throw 하면 빈 화면이 되는데,
+이제 원인(예: API 401, 미정의 참조)이 화면에 보여 진단 가능. 빈 화면 대신 에러 메시지가 뜬다.
+
+### Safari 대시보드 빈 화면 수정 (v0.0.40)
+
+Safari 에서 대시보드가 통째로 안 보이던 문제 — 대시보드는 100% JS 렌더라 `fmtDate` 가 throw 하면 모든 패널이
+빈다. 두 Safari 특이사항을 회피: (1) `Instant` 가 ISO 소수점 **나노초(9자리)** 로 직렬화돼(`...18.672182191Z`)
+Safari `new Date` 가 Invalid Date 처리 → 밀리초 3자리로 잘라낸 뒤 파싱. (2) `toLocaleString({dateStyle,timeStyle})`
+은 Safari 14.1 미만에서 RangeError → 직접 포맷으로 대체. 날짜 정렬도 동일 정규화(`toDate`) 적용.
+
+### 완료 PR → 티켓 회고 등록 (v0.0.36)
+
+merge된 PR URL 하나로 Jira 티켓을 만들고 현재 스프린트에 완료 상태로 올린다.
+
+- **흐름**: PR 조회(GitHub) → 내용 분석(Claude: BUG/FEATURE/OTHER + 제목/요약) → **PR 생성~merge 영업일**(주말 제외)로
+  Story Point 산정(≤0.5→1, ≤1→2, ≤2→3, ≤3→5, >3→8) → 티켓 생성 → 현재 스프린트로 이동 →
+  해야 할 일→진행 중→검토 중→완료까지 한번에 전환. 로컬 DB 에 완료일=merge 시각으로 적재(추이 반영).
+- **보고자/담당자 = PR 작성자** (v0.0.38): 해결 우선순위 — ① **명시적 GitHub↔Jira 매핑**(`github_user_mappings`,
+  v0.0.39) → ② GitHub 프로필 이름으로 Jira user search → ③ 실행자(슬랙) → ④ 토큰 소유자. 해결된 accountId 를
+  createIssue 에 넘기면 reporter+assignee 가 모두 그 사람으로 지정된다.
+  매핑 관리: `/api/github-mappings` (GET/POST/DELETE — POST 는 `jiraDisplayName`으로 accountId 자동 해석).
+  ※ 한글팀처럼 GitHub 이름 ≠ Jira 영문 표시명이라 이름검색이 실패하는 사용자는 이 매핑으로 등록.
+- **슬랙**: `@지라 pr <PR URL>`.
+- **대시보드**: PR 현황 탭 상단 입력칸 + [PR → 티켓 등록]. `POST /api/dashboard/actions/import-pr {url}`.
+- merge 안 된 PR/잘못된 URL/조회 실패는 사유와 함께 거부. PR 출처는 티켓 댓글로 기록.
+
+### 히스토리 백필 + 날짜 파싱 수정 (v0.0.35)
+
+추이/통계가 과거 기록을 못 보여주던 두 원인을 해결:
+- **`parseInstant` 버그**: Jira Cloud 의 날짜 오프셋이 `+0900`(콜론 없음)인데 `Instant.parse` 는 `Z` 형식만 받아
+  예외 → 동기화로 들어온 모든 이슈의 생성일/완료일이 **null 로 저장**되고 있었다. 콜론 유무 오프셋과 `Z` 를 모두
+  파싱하도록 수정 → 이후 동기화부터 날짜가 정상 적재된다.
+- **히스토리 부재**: 동기화는 현재 스프린트+백로그만 유지(완료분 prune)하므로 과거가 없다.
+  `POST /api/dashboard/actions/backfill-history`(대시보드 추이 탭 **[히스토리 백필]** 버튼)로 Jira 전체 이슈를
+  1회 upsert(생성일/완료일 포함)한다. 완료 시각은 `resolutiondate`(비면 `statusCategoryChangedDate`) 사용.
+- **완료 이슈 보존**: 백로그 prune 이 `completedAt IS NOT NULL` 이슈는 삭제하지 않게 변경 → 백필분과 이후 완료분이
+  히스토리로 누적된다.
+
+### 응답 시간 계측 (v0.0.29)
+
+이슈 생성 응답이 느릴 때 원인 구간을 바로 짚을 수 있도록 매 건 계측한다.
+
+- **DB 적재**: `response_metrics` 테이블 (Flyway V2) — Slack 메시지 ts 기준 **end-to-end total_ms** +
+  Spring 내부 단계별(`classify`/`duplicate`/`jira`/`db`/`notify`) ms, 실패 건도 errorType 과 함께 기록.
+  total 과 단계 합의 차이 ≈ Haiku 의도분류 + Go봇/터널 전달 + async 큐 대기 (Spring 밖 구간).
+- **Slack 표기**: 이슈/에픽 생성 메시지 맨 끝에 `⏱ 응답 시간 N.N초` context 라인.
+- **대시보드**: 봇 상태 탭에 7일 통계 카드(건수/평균/p50/p95/최대) + 최근 50건 단계별 테이블
+  (`GET /api/dashboard/response-metrics`).
+
+### 버그 수정 (v0.0.28)
+
+- Slack 발 이슈 생성 시 DB `issues.reporter` 에 Slack ID 가 저장되던 버그 수정 — Jira displayName 으로 저장
+  (할당 DM 의 `reporter:` 라인에 raw Slack ID 가 노출되던 원인).
+
+### Claude CLI 최적화 (v0.0.22)
+
+- **프롬프트 skill 파일 외부화**: 분류/검색/해결요약/브랜치슬러그 시스템 프롬프트를 디스크 `prompts/*.md` 로 분리하고
+  `--system-prompt-file` 로 전달 (headless 권장 패턴, stdin 은 순수 사용자 입력만). 프롬프트 수정에 재빌드 불필요,
+  파일 없으면 기존 인라인 방식으로 자동 폴백.
+- **모델 계층화**: 브랜치 슬러그 같은 단순 변환은 `claude.fast-model`(기본 Haiku 4.5)로 — Sonnet 대비 수 초 단축.
+  품질이 중요한 이슈 분류·시맨틱 검색·버그 해결 요약은 Sonnet 유지.
+- **검색 컨텍스트 상한**: 시맨틱 검색이 Claude 에게 보내는 이슈 목록을 최근 갱신순 150건으로 제한 — 토큰/지연 절감.
 
 ## 아키텍처
 
@@ -62,9 +241,36 @@ JIRA_PROJECT_KEY=<프로젝트 키 (예: PROJ)>
 POSTGRES_DB=jirabot
 POSTGRES_USER=jirabot
 POSTGRES_PASSWORD=<임의 비밀번호>
+
+# GitHub 브랜치 생성 (선택) — 비우면 "진행 중" 시 Jira 개발 패널 링크 안내로 폴백
+GITHUB_BRANCH_TOKEN=<fine-grained PAT, 대상 repo Contents: Read & Write>
+GITHUB_ORG=<조직 (기본 CryptoLabInc)>
+GITHUB_BRANCH_REPOS=<버튼에 띄울 repo, 콤마 구분 (기본 envector-msa,evi)>
+
+# 터널 경유 대시보드 접근 (선택, v0.0.30) — 둘 다 설정해야 Go봇 프록시가 켜짐
+DASHBOARD_USER=<대시보드 Basic Auth 아이디>
+DASHBOARD_PASSWORD=<대시보드 Basic Auth 비밀번호 (강한 랜덤값)>
+
+# 기능요청 게시판 (선택, v0.0.32) — 새 글 등록 시 DM 받을 Slack user ID (비우면 DM 생략)
+FEATURE_REQUEST_NOTIFY_USER=<관리자 Slack user ID (예: U03L1TJ0EBB)>
 ```
 
-### 2. 서비스 기동 (4개 터미널)
+> **GitHub 토큰 발급**: GitHub → Settings → Developer settings → Fine-grained tokens → Resource owner=조직, 대상 repo 선택, Repository permissions의 **Contents: Read and write**. 발급한 토큰을 `GITHUB_BRANCH_TOKEN`에 넣으면 "진행 중" 전환 시 repo 선택 버튼이 활성화됩니다.
+
+### 2-A. 서비스 기동 — Docker Compose (권장, v0.0.25)
+
+```bash
+# 사전 조건: .env 작성 + 호스트에서 claude login (CLI 인증을 컨테이너 볼륨으로 재사용)
+docker-compose --profile full up -d --build   # Postgres + Spring(:8080) + Go봇(:3000)
+ngrok http 3000                                # 터널만 호스트에서
+```
+
+- `--profile full` 없이 `up -d` 하면 **Postgres만** 기동 (bare-metal 운영 호스트와 포트 충돌 방지용 안전장치).
+- 필수 환경변수(SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, JIRA_BASE_URL/EMAIL/API_TOKEN/PROJECT_KEY)가 비어 있으면
+  서버가 **기동 시점에 누락 키 목록과 함께 즉시 실패**합니다 (fail-fast — 모호한 첫-호출 실패 대신).
+- bare-metal 운영 로그 로테이션: `sudo cp ops/logrotate-slackbot /etc/logrotate.d/slackbot` (일 1회, 7일 보관).
+
+### 2-B. 서비스 기동 — 수동 (4개 터미널)
 
 ```bash
 # Terminal 1: PostgreSQL
@@ -99,14 +305,22 @@ ngrok http 3000
 
 | 명령 | 설명 |
 |---|---|
-| `@봇더지라 help` | 도움말 표시 |
-| `@봇더지라 sprint` | 스프린트 일일 리포트 |
-| `@봇더지라 내작업` | 내 진행 중인 작업 조회 |
-| `@봇더지라 작업 Alice` | 특정 팀원의 작업 조회 |
-| `@봇더지라 검색 <키워드>` | 이슈 제목으로 검색 |
-| `@봇더지라 리마인더 on` / `off` / `상태` | 평일 09:00 KST 미해결 이슈 DM 알림 토글 (기본 OFF, 본인이 직접 켜야 동작) |
-| `@봇더지라 sync` | Jira → DB 수동 동기화 |
-| `@봇더지라 완료` | 이슈 스레드에서 → Jira 완료 처리 |
+| `@지라 help` | 도움말 표시 |
+| `@지라 안녕` | 인사 + 사용법 안내 (안녕/하이/hi/hello 등) |
+| `@지라 scrum` | 스프린트 일일 리포트 |
+| `@지라 통계` | 활성 스프린트 통계(담당자/상태별, SP 집계) |
+| `@지라 내작업` | 내 진행 중인 작업 조회 |
+| `@지라 작업 김영현` | 특정 팀원의 작업 조회 |
+| `@지라 검색 <키워드>` | 이슈 제목·설명 의미 검색 (모든 상태 포함) |
+| `@지라 ES2-123` | 이슈 키로 상세 카드 조회 (상태 전환 버튼 포함, `ES2-123 보여줘` 같은 접미어 허용) |
+| `@지라 할당 ES2-123 홍길동` | 이슈 담당자 지정 (`@멘션` 도 가능 — 등록된 사용자만) |
+| `@지라 할당알림 on` / `off` / `상태` | 본인 할당 시 DM 알림 토글 (기본 ON) |
+| `@지라 버그` / `@지라 버그 YYYY.MM.DD` | 해결된 버그 조회(트러블슈팅) |
+| `@지라 등록 <Jira 사용자명>` | 본인 Slack↔Jira 매핑 등록 |
+| `@지라 리마인더 on` / `off` / `상태` | 미해결 이슈 DM 리마인더 토글 |
+| `@지라 notion백필` | 전체 버그를 Notion '버그 현황' DB에 동기화 |
+| `@지라 sync` | Jira → DB 수동 동기화 |
+| `@지라 완료` | 이슈 스레드에서 → Jira 완료 처리 |
 
 ### 자연어 입력 (AI 분류 → Jira 이슈 생성)
 
@@ -117,14 +331,44 @@ ngrok http 3000
 
 AI가 자동으로 분류(BUG/FEATURE/OTHER), 제목, Story Point를 추정합니다.
 
+### 리마인더 (opt-in)
+
+미해결 이슈를 DM으로 알려주는 기능. 먼저 `@지라 등록 <Jira 사용자명>` 으로 매핑을 만든 뒤 켭니다.
+
+| 명령 | 설명 |
+|---|---|
+| `@지라 리마인더 on` | 켜기 |
+| `@지라 리마인더 off` | 끄기 |
+| `@지라 리마인더 상태` | 현재 ON/OFF·스케줄 확인 (`status` 도 가능) |
+
+- **일일 리마인더** — 평일 **09:00 KST**, **현재 활성 스프린트**의 미해결 이슈만. "진행 중"으로 `reminder.stale-days`(기본 7일) 이상 정체된 이슈는 ⚠️ + 경과 일수로 태그(진입 시각 `inProgressSince` 기준).
+- **격주 리마인더** — **월요일 09:30 KST**, **전체 미해결 이슈**(스프린트+백로그). `reminder.biweekly-anchor`(기본 `2026-06-22`)를 기준으로 **격주(짝수 주차)** 월요일에만 발송.
+- 중복 방지: 격주 리마인더가 나가는 월요일에는 그날의 일일 리마인더를 생략합니다.
+- **소유 기준**: 이슈 담당자(assignee)에게 귀속, 담당자가 없으면 **보고자(reporter)** 에게 귀속.
+- 미해결 0건인 사용자에게는 DM을 보내지 않습니다.
+- 설정: `reminder.cron`(일일), `reminder.biweekly-cron`(격주 점화), `reminder.biweekly-anchor`(격주 기준 월요일), `reminder.stale-days`(정체 임계, 기본 7), `reminder.zone`, `reminder.enabled`(전역 차단).
+
+### 에픽 생성 (`에픽`/`epic` 키워드)
+
+```
+@지라 에픽 GCP marketplace 배포 확장      → Epic으로 등록 (SP 없음)
+@지라 create epic for billing revamp     → Epic으로 등록
+```
+
+메시지에 `에픽` 또는 `epic` 이 단어로 포함되면 **AI 분류를 거치지 않고 항상 Epic으로 생성**됩니다.
+에픽은 컨테이너성 이슈라 Story Point를 부여하지 않으며, 스프린트 워크플로 버튼(해야 할 일/진행 중)도
+표시하지 않아 일반 스토리/버그와 시각적으로 구별됩니다. Jira 이슈타입명은 `JIRA_ISSUE_TYPE_EPIC` 로 설정
+(ES2는 `에픽`).
+
 ### 스레드 액션 (이슈 생성 스레드에서 댓글로 사용)
 
 | 명령 | 설명 |
 |---|---|
-| `@봇더지라 하위작업 <내용>` | 하위작업 생성 (Sonnet이 제목/SP 추정) |
-| `@봇더지라 댓글 <내용>` | Jira 이슈에 코멘트 추가 |
-| `@봇더지라 수정 <내용>` | Jira 설명에 내용 추가 (append) |
-| `@봇더지라 완료` | Jira 상태 완료로 전환 |
+| `@지라 하위작업 <내용>` | 하위작업 생성 (Sonnet이 제목/SP 추정) |
+| `@지라 댓글 <내용>` | Jira 이슈에 코멘트 추가 |
+| `@지라 수정 <내용>` | Jira 설명에 내용 추가 (append) |
+| `@지라 담당자 <이름>` | 이 스레드 이슈의 담당자 지정 (응답에 대상 이슈 키 명시) |
+| `@지라 완료` | Jira 상태 완료로 전환 |
 | 자연어 입력 | AI가 액션 자동 판단 (하위작업/댓글/수정) |
 
 ### 사용 예시
@@ -285,3 +529,4 @@ slackbot/
 | Claude CLI 인증 만료 | `claude login` 재실행 |
 | "이해하지 못했어요" 반복 | `intent_failures` 테이블 확인 (`docker exec jirabot-postgres psql -U jirabot -d jirabot -c "SELECT * FROM intent_failures ORDER BY failed_at DESC LIMIT 10;"`) |
 | 봇이 특정 채널에서 무응답 | `.env`의 `SLACK_ALLOWED_CHANNELS`에 해당 채널 ID 추가 |
+| `column ... does not exist` (예: `reminder_enabled`) | `ddl-auto=update`가 데이터 있는 테이블에 `NOT NULL` 컬럼을 DEFAULT 없이 ADD 하다 실패 → Hibernate가 WARN만 남기고 기동(컬럼 미생성). 엔티티에 `@Column(columnDefinition="... default ...")` 명시. 기존 DB는 `ALTER TABLE <t> ADD COLUMN IF NOT EXISTS <c> <type> NOT NULL DEFAULT <v>;` 수동 적용 |

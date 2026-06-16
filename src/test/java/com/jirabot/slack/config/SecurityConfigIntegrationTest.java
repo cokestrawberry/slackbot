@@ -7,9 +7,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.jirabot.slack.filter.CachedBodyFilter;
 import com.jirabot.slack.filter.SlackSignatureFilter;
+import com.jirabot.slack.repository.FeatureRequestRepository;
+import com.jirabot.slack.repository.GitHubUserMappingRepository;
 import com.jirabot.slack.repository.IntentFailureRepository;
 import com.jirabot.slack.repository.IssueRepository;
 import com.jirabot.slack.repository.ProcessedJiraChangelogRepository;
+import com.jirabot.slack.repository.ResponseMetricRepository;
 import com.jirabot.slack.repository.UserMappingRepository;
 import com.jirabot.slack.service.JiraSyncService;
 import jakarta.servlet.Filter;
@@ -28,6 +31,12 @@ import org.springframework.test.web.servlet.MockMvc;
 @AutoConfigureMockMvc
 @TestPropertySource(properties = {
         "slack.signing-secret=test-signing-secret",
+        // StartupEnvValidator(필수 키 fail-fast) 통과용 더미 — 이 테스트는 test 프로필을 안 쓰므로 직접 주입.
+        "slack.bot-token=xoxb-test",
+        "jira.base-url=http://localhost:9999",
+        "jira.email=test@example.com",
+        "jira.api-token=test-token",
+        "jira.project-key=TEST",
         "spring.autoconfigure.exclude=" +
                 "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration," +
                 "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration"
@@ -48,6 +57,15 @@ class SecurityConfigIntegrationTest {
 
     @MockitoBean
     private ProcessedJiraChangelogRepository processedJiraChangelogRepository;
+
+    @MockitoBean
+    private ResponseMetricRepository responseMetricRepository;
+
+    @MockitoBean
+    private FeatureRequestRepository featureRequestRepository;
+
+    @MockitoBean
+    private GitHubUserMappingRepository gitHubUserMappingRepository;
 
     @MockitoBean
     private JiraSyncService jiraSyncService;

@@ -3,6 +3,7 @@ package com.jirabot.slack.client;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jirabot.slack.client.dto.BugResolutionSummary;
 import com.jirabot.slack.client.dto.IntentResult;
 import com.jirabot.slack.client.dto.IssueClassification;
 import com.jirabot.slack.client.dto.IssueSearchEntry;
@@ -29,21 +30,18 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
     // Few-shot 은 직접 JSON 오브젝트로 교체 — 모델이 같은 형식을 모방하도록 유도.
     static final String SYSTEM_PROMPT = """
             You are a Jira triage assistant. Classify a short natural-language description into one of
-            {BUG, FEATURE, OTHER} and recommend a Story Point from the Fibonacci set {1, 2, 3, 5, 8, 13}.
+            {BUG, FEATURE, OTHER} and recommend a Story Point from the set {1, 2, 3, 5, 8}.
 
             Rules:
             - BUG: something is broken, behaves incorrectly, or throws errors.
             - FEATURE: a new capability, enhancement, or UX improvement is requested.
             - OTHER: docs, chores, questions, or anything that is not a bug or feature.
-            - Story points reflect effort + uncertainty using the team's calibrated scale:
-              - 1 = Small (반나절 이하의 가벼운 작업)
-              - 2 = Medium (하루 정도의 일반적인 작업 A)
-              - 3 = Large (1~2일의 일반적인 작업 B)
-              - 5 = X-Large (2~3일의 조금 무거운 작업)
-              - 8 = Warning (3~4일, 스프린트에 넣을 수 있는 최대 크기)
-              - 13 = Too Big (스프린트 한 번에 끝내기 어려울 만큼 큰 작업.
-                반드시 분해해야 한다는 의미는 아니며, 하위작업(subtask)으로 분해해 진행할 수 있다.)
-            - 21 이상에 해당할 만큼 큰 작업이라도 storyPoint 는 13 으로 캡한다 (에픽/프로젝트는 별도 관리 영역).
+            - Story points reflect effort + uncertainty (1인 기준 소요 시간 + 불확실성):
+              1 = 반나절 이하 (small), 2 = 하루 (medium), 3 = 1~2일 (large),
+              5 = 2~3일 (X-large), 8 = 3~4일 (⚠️ 스프린트에 넣을 수 있는 최대 크기).
+              재현/원인 조사가 여러 단계로 불확실하면 한 단계 올린다.
+            - 8 is the maximum. Never output 13 or higher. If the work clearly exceeds 8
+              (에픽급, 분할 필요), still output 8 — it is the signal that the item should be split.
             - title: <= 120 Korean/English characters, imperative mood.
             - summary: 1-2 concise paragraphs summarizing the problem/request.
             - An INTENT HINT may be provided above the user input.
@@ -76,6 +74,23 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
 
     private static final String STDIN_DELIMITER = "\n\n---\nUSER INPUT:\n";
 
+    // STUDY: 시스템 프롬프트를 디스크 skill 파일(prompts/)로 분리해 --system-prompt-file 로 전달한다
+    //        (headless 권장 패턴, IntentClassifierImpl 과 동일). 효과: (1) system 롤 배치로 지시 준수율 향상,
+    //        (2) stdin 은 순수 사용자 입력만 — 프롬프트 인젝션 경계 명확, (3) 프롬프트 수정에 재빌드 불필요.
+    //        파일이 없으면(부분 배포 등) 기존 인라인 상수 + stdin 합본 방식으로 폴백해 무중단을 보장한다.
+    static final String CLASSIFIER_PROMPT_FILE = "prompts/sonnet-classifier.md";
+    static final String RESOLUTION_PROMPT_FILE = "prompts/sonnet-resolution.md";
+    static final String BRANCH_SLUG_PROMPT_FILE = "prompts/haiku-branch-slug.md";
+    static final String SEARCH_PROMPT_FILE = "prompts/sonnet-issue-search.md";
+
+    private static boolean promptFileExists(String path) {
+        try {
+            return java.nio.file.Files.isReadable(java.nio.file.Path.of(path));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private final ProcessRunner processRunner;
     private final ClaudeProperties props;
     private final ObjectMapper objectMapper;
@@ -101,17 +116,18 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
         try {
             // STUDY: stdin 으로 프롬프트 전달 — argv 는 shell 이스케이프/플랫폼별 길이 제한 이슈 회피.
             //        한국어/개행/따옴표가 섞여도 byte-safe.
-            List<String> command = buildCommand();
+            //        skill 파일이 있으면 시스템 프롬프트는 --system-prompt-file 로, stdin 은 사용자 입력만.
+            boolean useFile = promptFileExists(CLASSIFIER_PROMPT_FILE);
+            List<String> command = buildCommand(props.model(), useFile ? CLASSIFIER_PROMPT_FILE : null);
 
             // STUDY: intentHint 가 있으면 INTENT HINT 블록을 삽입하여 Haiku 분류 결과를 Sonnet 에게 전달한다.
             //        confidence 가 낮거나 hint 가 없으면 기존 포맷 유지.
-            String stdin;
-            if (intentHint != null && intentHint.intent() != null && !intentHint.intent().isBlank()) {
-                stdin = SYSTEM_PROMPT + "\n\n---\nINTENT HINT: " + intentHint.intent()
-                        + " (confidence: " + intentHint.confidence() + ")\n---\nUSER INPUT:\n" + rawText;
-            } else {
-                stdin = SYSTEM_PROMPT + STDIN_DELIMITER + rawText;
-            }
+            String hintBlock = (intentHint != null && intentHint.intent() != null && !intentHint.intent().isBlank())
+                    ? "INTENT HINT: " + intentHint.intent() + " (confidence: " + intentHint.confidence() + ")\n---\n"
+                    : "";
+            String stdin = useFile
+                    ? hintBlock + "USER INPUT:\n" + rawText
+                    : SYSTEM_PROMPT + "\n\n---\n" + hintBlock + "USER INPUT:\n" + rawText;
 
             Duration timeout = Duration.ofSeconds(props.timeoutSeconds());
 
@@ -146,11 +162,12 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
             return Collections.emptyList();
         }
         try {
-            String systemPrompt = loadSearchPrompt();
-            String stdin = buildSearchStdin(systemPrompt, userQuery, issues);
+            // STUDY: 디스크 skill 파일 우선(--system-prompt-file), 없으면 classpath 리소스를 stdin 에 합본(폴백).
+            boolean useFile = promptFileExists(SEARCH_PROMPT_FILE);
+            String stdin = buildSearchStdin(useFile ? null : loadSearchPrompt(), userQuery, issues);
 
             // STUDY: Sonnet 모델로 호출. 기존 classify와 동일한 CLI 패턴이지만 model은 props.model() (Sonnet).
-            List<String> command = buildCommand();
+            List<String> command = buildCommand(props.model(), useFile ? SEARCH_PROMPT_FILE : null);
             Duration timeout = Duration.ofSeconds(props.timeoutSeconds());
 
             ProcessRunner.Result result = processRunner.run(command, stdin, timeout);
@@ -189,10 +206,13 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
         }
     }
 
-    // STUDY: 패키지-프라이빗으로 테스트에서 직접 호출 가능.
+    // STUDY: 패키지-프라이빗으로 테스트에서 직접 호출 가능. systemPrompt 가 null 이면
+    //        시스템 프롬프트는 --system-prompt-file 로 전달된 것 — stdin 에는 사용자 콘텐츠만 담는다.
     String buildSearchStdin(String systemPrompt, String userQuery, List<IssueSearchEntry> issues) {
         StringBuilder sb = new StringBuilder();
-        sb.append(systemPrompt).append("\n\n");
+        if (systemPrompt != null && !systemPrompt.isBlank()) {
+            sb.append(systemPrompt).append("\n\n");
+        }
         sb.append("[사용자 질문]\n").append(userQuery).append("\n\n");
         sb.append("[이슈 목록]\n");
         for (IssueSearchEntry entry : issues) {
@@ -257,17 +277,130 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
         return s;
     }
 
-    private List<String> buildCommand() {
+    // STUDY: 버그 완료 시 원인/해결 요약. classify 와 동일한 CLI 패턴(Sonnet, --output-format json).
+    static final String RESOLUTION_PROMPT = """
+            You summarize how a software bug was resolved, in Korean.
+            Given a Jira bug's description, its comments, and the Slack thread discussion,
+            extract the root cause and the fix.
+
+            Rules:
+            - cause: 근본 원인을 1-2문장으로. 정보가 부족하면 "정보 부족"이라고 적는다.
+            - fix: 적용된 해결 방법을 1-2문장으로. 불명확하면 "해결 방법 불명확"이라고 적는다.
+            - 추측을 사실처럼 단정하지 말 것. 주어진 텍스트에 근거.
+
+            You MUST respond with ONLY a valid JSON object: {"cause":"...","fix":"..."}
+            No markdown fences. No prose. JSON.parse-able only.
+            """;
+
+    @Override
+    public BugResolutionSummary summarizeBugResolution(String issueKey, String description,
+                                                       List<String> comments, List<String> threadMessages) {
+        try {
+            boolean useFile = promptFileExists(RESOLUTION_PROMPT_FILE);
+            StringBuilder sb = new StringBuilder(useFile ? "" : RESOLUTION_PROMPT);
+            sb.append("\n\n---\nISSUE: ").append(issueKey == null ? "" : issueKey).append("\n");
+            sb.append("DESCRIPTION:\n").append(description == null || description.isBlank() ? "(none)" : description).append("\n\n");
+            sb.append("COMMENTS:\n");
+            if (comments == null || comments.isEmpty()) {
+                sb.append("(none)\n");
+            } else {
+                for (String c : comments) {
+                    sb.append("- ").append(c).append("\n");
+                }
+            }
+            sb.append("\nSLACK THREAD:\n");
+            if (threadMessages == null || threadMessages.isEmpty()) {
+                sb.append("(none)\n");
+            } else {
+                for (String m : threadMessages) {
+                    sb.append("- ").append(m).append("\n");
+                }
+            }
+
+            ProcessRunner.Result result = processRunner.run(
+                    buildCommand(props.model(), useFile ? RESOLUTION_PROMPT_FILE : null),
+                    sb.toString(), Duration.ofSeconds(props.timeoutSeconds()));
+            if (result.timedOut() || result.exitCode() != 0
+                    || result.stdout() == null || result.stdout().isBlank()) {
+                log.warn("Claude resolution summary failed for {} (timeout={}, exit={})",
+                        issueKey, result.timedOut(), result.exitCode());
+                return BugResolutionSummary.fallback();
+            }
+            JsonNode envelope = objectMapper.readTree(result.stdout());
+            if (envelope.path("is_error").asBoolean(false)) {
+                return BugResolutionSummary.fallback();
+            }
+            String inner = envelope.path("result").asText("");
+            if (inner.isBlank()) {
+                return BugResolutionSummary.fallback();
+            }
+            return objectMapper.readValue(stripToJsonObject(inner), BugResolutionSummary.class);
+        } catch (Exception e) {
+            log.warn("Claude resolution summary error for {}: {}", issueKey, e.toString());
+            return BugResolutionSummary.fallback();
+        }
+    }
+
+    // STUDY: 한글(또는 임의 언어) 이슈 요약을 영어 git 브랜치 슬러그로 변환. classify 와 동일한 CLI 패턴.
+    static final String BRANCH_SLUG_PROMPT = """
+            You convert a Jira issue summary into a concise English git branch slug.
+            Rules:
+            - Output ONLY the slug: lowercase ASCII words joined by single hyphens.
+            - 2 to 5 words capturing the core action/subject.
+            - No issue key, no prefix (no "feature/" or "bugfix/"), no quotes, no prose, no markdown.
+            - One line only.
+            Example: "로그인 페이지에서 500 에러 발생" -> fix-login-500-error
+            """;
+
+    @Override
+    public String englishBranchSlug(String summary) {
+        if (summary == null || summary.isBlank()) {
+            return "";
+        }
+        try {
+            // STUDY: 단순 변환 작업이라 Haiku(fastModel)로 처리 — Sonnet 대비 수 초 빠르고 품질 차이 없음.
+            boolean useFile = promptFileExists(BRANCH_SLUG_PROMPT_FILE);
+            String stdin = useFile ? summary : BRANCH_SLUG_PROMPT + STDIN_DELIMITER + summary;
+            ProcessRunner.Result result = processRunner.run(
+                    buildCommand(props.fastModel(), useFile ? BRANCH_SLUG_PROMPT_FILE : null),
+                    stdin, Duration.ofSeconds(props.timeoutSeconds()));
+            if (result.timedOut() || result.exitCode() != 0
+                    || result.stdout() == null || result.stdout().isBlank()) {
+                log.warn("Claude branch slug failed (timeout={}, exit={})",
+                        result.timedOut(), result.exitCode());
+                return "";
+            }
+            JsonNode envelope = objectMapper.readTree(result.stdout());
+            if (envelope.path("is_error").asBoolean(false)) {
+                return "";
+            }
+            String inner = envelope.path("result").asText("");
+            // 모델이 여러 줄/따옴표를 붙일 수 있으니 첫 줄만, 트림. 최종 슬러그 정제는 BranchNameBuilder 가 담당.
+            String firstLine = inner.strip().lines().findFirst().orElse("").strip();
+            return firstLine.replaceAll("^[\"'`]+|[\"'`]+$", "").strip();
+        } catch (Exception e) {
+            log.warn("Claude branch slug error: {}", e.toString());
+            return "";
+        }
+    }
+
+    private List<String> buildCommand(String model, String systemPromptFile) {
         // STUDY: --output-format json → { type, subtype, result, is_error, ... } envelope 로 감싸져서 machine-parseable.
         // STUDY: --max-turns 1 → 모델이 단 한 번의 응답만 내놓도록 보장 (도구 반복 호출 루프 차단).
         // STUDY: --permission-mode plan → CLI 자체가 파일/쉘 도구 실행을 거부. 분류 전용 호출에 적합.
-        return List.of(
+        // STUDY: --system-prompt-file → 디스크 skill 파일을 system 롤로 전달 (IntentClassifierImpl 과 동일 패턴).
+        List<String> cmd = new java.util.ArrayList<>(List.of(
                 props.cliPath(), "-p",
                 "--output-format", "json",
                 "--permission-mode", props.permissionMode(),
                 "--max-turns", String.valueOf(props.maxTurns()),
-                "--model", props.model()
-        );
+                "--model", model
+        ));
+        if (systemPromptFile != null) {
+            cmd.add("--system-prompt-file");
+            cmd.add(systemPromptFile);
+        }
+        return cmd;
     }
 
     private IssueClassification parseEnvelope(String stdout, String rawText) {

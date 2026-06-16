@@ -4,10 +4,14 @@ import com.jirabot.slack.client.JiraApiClient;
 import com.jirabot.slack.client.dto.SprintInfo;
 import com.jirabot.slack.client.dto.SprintIssue;
 import com.jirabot.slack.entity.IssueEntity;
+import com.jirabot.slack.entity.StatusCategory;
 import com.jirabot.slack.repository.IssueRepository;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -24,10 +28,13 @@ public class JiraSyncServiceImpl implements JiraSyncService {
 
     private final JiraApiClient jira;
     private final IssueRepository issueRepository;
+    private final String projectKey;
 
-    public JiraSyncServiceImpl(JiraApiClient jira, IssueRepository issueRepository) {
+    public JiraSyncServiceImpl(JiraApiClient jira, IssueRepository issueRepository,
+                               com.jirabot.slack.config.JiraProperties jiraProps) {
         this.jira = jira;
         this.issueRepository = issueRepository;
+        this.projectKey = jiraProps == null || jiraProps.projectKey() == null ? "" : jiraProps.projectKey();
     }
 
     // STUDY: cron = "초 분 시 일 월 요일". 매일 오전 8시(KST)에 자동 실행.
@@ -35,8 +42,89 @@ public class JiraSyncServiceImpl implements JiraSyncService {
     @Scheduled(cron = "0 0 8 * * *", zone = "Asia/Seoul")
     public void scheduledSync() {
         log.info("Daily scheduled sync started");
+        log.info(fullSync());
+    }
+
+    @Override
+    public String fullSync() {
+        // STUDY: sprint/backlog 를 한 번만 fetch 해서 sync 와 prune 이 공유한다.
+        //        기존엔 pruneDeletedIssues 가 같은 목록을 다시 fetch 해 Jira 왕복이 2배(페이지네이션 포함)였다.
+        Optional<SprintInfo> active = jira.getActiveSprint();
+        List<SprintIssue> sprintIssues = active.map(s -> jira.getSprintIssues(s.id())).orElse(List.of());
+        List<SprintIssue> backlogIssues = jira.getBacklogIssues();
+
+        String activeMsg = active.isEmpty()
+                ? "활성 스프린트가 없어 동기화를 건너뜁니다."
+                : syncActiveSprint(active.get(), sprintIssues);
+        String backlogMsg = syncBacklog(backlogIssues);
+
+        Set<String> seen = new HashSet<>();
+        sprintIssues.forEach(i -> seen.add(i.key()));
+        backlogIssues.forEach(i -> seen.add(i.key()));
+        int pruned = pruneDeletedIssues(seen);
+
+        lastSyncAt = Instant.now();
+        String prune = pruned > 0 ? String.format("\n:wastebasket: Jira 에서 삭제된 이슈 %d건 정리", pruned) : "";
+        return activeMsg + "\n" + backlogMsg + prune;
+    }
+
+    // STUDY: 검색 선행 sync 의 TTL 게이트용 타임스탬프. volatile — 스케줄러/검색이 서로 다른 스레드에서
+    //        읽고 쓰므로 가시성만 보장하면 된다. 동시에 두 검색이 둘 다 sync 해도 멱등이라 락은 불필요.
+    private volatile Instant lastSyncAt;
+
+    @Override
+    public java.util.Optional<Instant> lastSyncAt() {
+        return java.util.Optional.ofNullable(lastSyncAt);
+    }
+
+    @Override
+    public void syncIfStale(java.time.Duration maxAge) {
+        Instant last = lastSyncAt;
+        if (last != null && Instant.now().isBefore(last.plus(maxAge))) {
+            log.debug("Sync skipped — last sync {} is within TTL {}", last, maxAge);
+            return;
+        }
         syncActiveSprint();
         syncBacklog();
+        lastSyncAt = Instant.now();
+    }
+
+    // STUDY: Jira 에서 삭제된 이슈 정리. 활성 스프린트+백로그 fetch 에 없는 "미완료" 로컬 이슈만 후보로 보고,
+    //        Jira 에 직접 조회해 404 인 것만 삭제. 완료 이슈는 리포트/이력용으로 보존하므로 제외한다.
+    //        fetch 가 maxResults 로 잘려도 존재 확인(issueExists)이 200 을 주면 보존돼 오삭제를 막는다.
+    @Override
+    public int pruneDeletedIssues() {
+        Set<String> seen = new HashSet<>();
+        Optional<SprintInfo> active = jira.getActiveSprint();
+        active.ifPresent(s -> jira.getSprintIssues(s.id()).forEach(i -> seen.add(i.key())));
+        jira.getBacklogIssues().forEach(i -> seen.add(i.key()));
+        return pruneDeletedIssues(seen);
+    }
+
+    // fullSync 가 이미 fetch 한 키 집합을 재사용하는 내부 경로 (Jira 재왕복 없음).
+    int pruneDeletedIssues(Set<String> seen) {
+        if (seen.isEmpty()) {
+            // 활성 스프린트도 없고 백로그도 비었음 → 비정상/일시 오류 가능. mass-delete 방지 위해 skip.
+            log.warn("Prune skipped: no issues seen from Jira (active+backlog empty)");
+            return 0;
+        }
+
+        List<IssueEntity> openIssues = issueRepository.findByStatusCategoryNot(StatusCategory.DONE);
+        List<String> toDelete = new ArrayList<>();
+        for (IssueEntity issue : openIssues) {
+            if (seen.contains(issue.getIssueKey())) {
+                continue;  // 현재 Jira 에 존재(활성/백로그)
+            }
+            // 후보: fetch 에 없음 → Jira 직접 확인. 404 만 삭제, 200/불확실은 보존.
+            if (!jira.issueExists(issue.getIssueKey())) {
+                toDelete.add(issue.getIssueKey());
+            }
+        }
+        if (!toDelete.isEmpty()) {
+            issueRepository.deleteByIssueKeyIn(toDelete);
+            log.info("Pruned {} Jira-deleted issues: {}", toDelete.size(), toDelete);
+        }
+        return toDelete.size();
     }
 
     @Override
@@ -45,10 +133,12 @@ public class JiraSyncServiceImpl implements JiraSyncService {
         if (activeSprint.isEmpty()) {
             return "활성 스프린트가 없어 동기화를 건너뜁니다.";
         }
-
         SprintInfo sprint = activeSprint.get();
-        List<SprintIssue> jiraIssues = jira.getSprintIssues(sprint.id());
+        return syncActiveSprint(sprint, jira.getSprintIssues(sprint.id()));
+    }
 
+    // fullSync 의 공유-fetch 경로용 내부 구현.
+    String syncActiveSprint(SprintInfo sprint, List<SprintIssue> jiraIssues) {
         int created = 0;
         int updated = 0;
 
@@ -61,6 +151,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                         ji.summary(), ji.issueType(), ji.status(), ji.statusCategory(),
                         ji.assignee(), ji.storyPoint(),
                         parseInstant(ji.updated()));
+                entity.setReporter(ji.reporter());
                 entity.setParentKey(ji.parentKey());
                 entity.setSubtask(ji.subtask());
                 // STUDY: 동기화 시마다 스프린트 정보를 갱신. 이슈가 다른 스프린트로 이동하면 자동 반영.
@@ -70,7 +161,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                 IssueEntity entity = new IssueEntity(
                         ji.key(), ji.summary(), ji.issueType(), ji.status(),
                         ji.statusCategory(), ji.assignee(), ji.storyPoint(),
-                        null, null,
+                        ji.reporter(), null,
                         parseInstant(ji.created()), parseInstant(ji.updated()));
                 entity.setParentKey(ji.parentKey());
                 entity.setSubtask(ji.subtask());
@@ -88,11 +179,13 @@ public class JiraSyncServiceImpl implements JiraSyncService {
 
     @Override
     public String syncBacklog() {
-        // STUDY: Jira 보드의 백로그 뷰와 로컬 DB 의 sprint_id IS NULL 집합을 일치시킨다.
-        //        - 기존 entity 가 옛 sprint_id 를 들고 있더라도 clearSprint 로 NULL 화 (sprint→backlog 이동 케이스)
-        //        - 이번 sync 에 안 잡힌 sprint_id IS NULL 항목은 stale 로 간주해 삭제 (보드 필터 제외/완료 이동 등)
-        List<SprintIssue> backlogIssues = jira.getBacklogIssues();
+        return syncBacklog(jira.getBacklogIssues());
+    }
 
+    // STUDY: Jira 보드의 백로그 뷰와 로컬 DB 의 sprint_id IS NULL 집합을 일치시킨다.
+    //        - 기존 entity 가 옛 sprint_id 를 들고 있더라도 clearSprint 로 NULL 화 (sprint→backlog 이동 케이스)
+    //        - 이번 sync 에 안 잡힌 sprint_id IS NULL 항목은 stale 로 간주해 삭제 (보드 필터 제외/완료 이동 등)
+    String syncBacklog(List<SprintIssue> backlogIssues) {
         int created = 0;
         int updated = 0;
 
@@ -104,6 +197,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                         ji.summary(), ji.issueType(), ji.status(), ji.statusCategory(),
                         ji.assignee(), ji.storyPoint(),
                         parseInstant(ji.updated()));
+                entity.setReporter(ji.reporter());
                 entity.setParentKey(ji.parentKey());
                 entity.setSubtask(ji.subtask());
                 entity.clearSprint();
@@ -112,7 +206,7 @@ public class JiraSyncServiceImpl implements JiraSyncService {
                 IssueEntity entity = new IssueEntity(
                         ji.key(), ji.summary(), ji.issueType(), ji.status(),
                         ji.statusCategory(), ji.assignee(), ji.storyPoint(),
-                        null, null,
+                        ji.reporter(), null,
                         parseInstant(ji.created()), parseInstant(ji.updated()));
                 entity.setParentKey(ji.parentKey());
                 entity.setSubtask(ji.subtask());
@@ -133,12 +227,70 @@ public class JiraSyncServiceImpl implements JiraSyncService {
         return result;
     }
 
-    private Instant parseInstant(String isoDatetime) {
+    // STUDY: Jira Cloud 는 날짜를 "2026-06-09T16:07:15.273+0900"(콜론 없는 오프셋)로 준다.
+    //        Instant.parse 는 'Z'(UTC) 형식만 받아 이 형식에서 예외 → 과거 동기화가 created/완료일을 전부 null 로
+    //        저장해 추이/통계가 비어 있었다. 콜론 없는 오프셋과 콜론 있는 오프셋, Z 형식을 모두 시도한다.
+    private static final java.time.format.DateTimeFormatter JIRA_OFFSET_NO_COLON =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+
+    static Instant parseInstant(String isoDatetime) {
         if (isoDatetime == null || isoDatetime.isBlank()) return null;
+        try {
+            return java.time.OffsetDateTime.parse(isoDatetime).toInstant();   // +09:00 / Z
+        } catch (Exception ignore) {
+            // fall through
+        }
+        try {
+            return java.time.OffsetDateTime.parse(isoDatetime, JIRA_OFFSET_NO_COLON).toInstant(); // +0900
+        } catch (Exception ignore) {
+            // fall through
+        }
         try {
             return Instant.parse(isoDatetime);
         } catch (Exception e) {
             return null;
         }
+    }
+
+    // STUDY: 추이/통계는 로컬 DB 만 읽는데, 동기화는 현재 스프린트+백로그만 유지(완료분은 prune)하므로
+    //        과거 기록이 없다. 이 백필은 Jira 의 전체 프로젝트 이슈를 1회 가져와 created/완료일을 채워 upsert 한다.
+    //        이후로는 (1) prune 이 완료 이슈를 보존하고, (2) parseInstant 수정으로 동기화가 날짜를 제대로 적재한다.
+    @Override
+    public String backfillHistory() {
+        List<SprintIssue> all = jira.searchByJql("project = " + projectKey + " ORDER BY created ASC");
+        int created = 0;
+        int updated = 0;
+        for (SprintIssue ji : all) {
+            Instant createdAt = parseInstant(ji.created());
+            Instant resolvedAt = StatusCategory.DONE.equals(ji.statusCategory())
+                    ? parseInstant(ji.resolutionDate()) : null;
+            Optional<IssueEntity> existing = issueRepository.findByIssueKey(ji.key());
+            if (existing.isPresent()) {
+                IssueEntity e = existing.get();
+                e.updateFrom(ji.summary(), ji.issueType(), ji.status(), ji.statusCategory(),
+                        ji.assignee(), ji.storyPoint(), parseInstant(ji.updated()));
+                e.setReporter(ji.reporter());
+                e.setParentKey(ji.parentKey());
+                e.setSubtask(ji.subtask());
+                if (createdAt != null) e.setJiraCreated(createdAt);
+                // updateFrom 은 "전환 시점" 에만 completedAt 을 만지므로, 이미 완료된 과거 이슈는 여기서 직접 채운다.
+                if (resolvedAt != null) e.setCompletedAt(resolvedAt);
+                // 스프린트 정보는 건드리지 않는다(활성 스프린트 뷰 보존).
+                updated++;
+            } else {
+                IssueEntity e = new IssueEntity(ji.key(), ji.summary(), ji.issueType(), ji.status(),
+                        ji.statusCategory(), ji.assignee(), ji.storyPoint(), ji.reporter(), null,
+                        createdAt, parseInstant(ji.updated()));
+                e.setParentKey(ji.parentKey());
+                e.setSubtask(ji.subtask());
+                if (resolvedAt != null) e.setCompletedAt(resolvedAt);
+                issueRepository.save(e);
+                created++;
+            }
+        }
+        String result = String.format("히스토리 백필 완료: 전체 %d건 (신규 %d, 갱신 %d)",
+                all.size(), created, updated);
+        log.info(result);
+        return result;
     }
 }

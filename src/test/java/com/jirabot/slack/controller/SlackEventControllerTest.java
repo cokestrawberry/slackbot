@@ -2,6 +2,8 @@ package com.jirabot.slack.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -54,6 +56,8 @@ class SlackEventControllerTest {
     private UserMappingRepository userMappingRepository;
     private SlackNotifier slackNotifier;
     private com.jirabot.slack.service.ReminderSubscriptionService reminderSubscriptionService;
+    private com.jirabot.slack.service.BugNotionService bugNotionService;
+    private com.jirabot.slack.service.PrImportService prImportService;
     private SlackEventController controller;
     private MockMvc mockMvc;
 
@@ -73,6 +77,8 @@ class SlackEventControllerTest {
         userMappingRepository = mock(UserMappingRepository.class);
         slackNotifier = mock(SlackNotifier.class);
         reminderSubscriptionService = mock(com.jirabot.slack.service.ReminderSubscriptionService.class);
+        bugNotionService = mock(com.jirabot.slack.service.BugNotionService.class);
+        prImportService = mock(com.jirabot.slack.service.PrImportService.class);
         Executor directExecutor = Runnable::run;
         SlackEventDeduplicator deduplicator = new SlackEventDeduplicator();
         controller = new SlackEventController(
@@ -80,17 +86,29 @@ class SlackEventControllerTest {
                 jiraSyncService, jiraApiClient, jiraProps, issueRepository, intentClassifier,
                 threadActionClassifier, intentFailureRepository,
                 userMappingRepository, slackNotifier,
-                directExecutor, deduplicator, reminderSubscriptionService, "C1,C2");
+                directExecutor, deduplicator, reminderSubscriptionService, bugNotionService,
+                prImportService, "C1,C2");
         mockMvc = standaloneSetup(controller).build();
+    }
+
+    // STUDY: 컨트롤러의 stale 가드(now - ts > 180s)를 통과하려면 이벤트 ts가 "현재"여야 한다.
+    //        과거 고정값(예: "1.0" = 1970년)을 쓰면 모든 라우팅이 stale로 차단된다.
+    private static String freshTs() {
+        return java.time.Instant.now().getEpochSecond() + ".000000";
+    }
+
+    // STUDY: app_mention 이벤트 JSON 빌더 — text/ts만 바뀌므로 한 곳에 모은다.
+    private static String appMentionEvent(String text, String ts) {
+        return """
+                {"type":"event_callback","event":{
+                    "type":"app_mention","user":"U1","text":"%s","channel":"C1","ts":"%s"}}
+                """.formatted(text, ts);
     }
 
     @Test
     void reminderOnCommand_callsEnable() throws Exception {
         when(reminderSubscriptionService.enable("U1")).thenReturn(":bell: 리마인더가 켜졌습니다.");
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 리마인더 on","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 리마인더 on", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -101,12 +119,45 @@ class SlackEventControllerTest {
     }
 
     @Test
+    void naturalLanguageWithPrUrl_routesToPrImport_notIssueCreation() throws Exception {
+        // "이 PR 관련 티켓 만들어줘" 같은 문장에 PR URL 이 섞여 와도 PR-import 로 가야 한다(문장이 제목 되면 안 됨).
+        when(prImportService.importPr(anyString(), any())).thenReturn(
+                new com.jirabot.slack.service.PrImportService.Result(
+                        true, "ES2-1", "https://j/browse/ES2-1", 2, 1.0, "완료", "Suyeong", null));
+        String url = "https://github.com/CryptoLabInc/envector-msa/pull/2005";
+        String body = appMentionEvent("<@U0BOT> " + url + " 관련해서 티켓 하나 만들어줘", freshTs());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(prImportService).importPr(eq(url), eq("U1"));
+        verify(issueCreateService, never()).createFromSlackText(any(), any());
+        verify(issueCreateService, never()).createFromSlackText(any());
+    }
+
+    @Test
+    void prUrlInsideSlackUnfurl_isExtracted() throws Exception {
+        // Slack 이 URL 을 <url|label> 로 unfurl 해도 URL 만 추출해 import.
+        when(prImportService.importPr(anyString(), any())).thenReturn(
+                new com.jirabot.slack.service.PrImportService.Result(
+                        true, "ES2-2", "u", 1, 0.5, "완료", "Kim", null));
+        String url = "https://github.com/CryptoLabInc/evi/pull/7";
+        String body = appMentionEvent("<@U0BOT> <" + url + "|evi#7> 티켓 만들어줘", freshTs());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(prImportService).importPr(eq(url), eq("U1"));
+    }
+
+    @Test
     void reminderOffCommand_callsDisable() throws Exception {
         when(reminderSubscriptionService.disable("U1")).thenReturn(":no_bell: 리마인더가 꺼졌습니다.");
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> reminder off","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> reminder off", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -119,10 +170,7 @@ class SlackEventControllerTest {
     @Test
     void reminderStatusCommand_callsStatus() throws Exception {
         when(reminderSubscriptionService.status("U1")).thenReturn(":no_bell: 리마인더 OFF.");
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 리마인더 상태","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 리마인더 상태", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -134,10 +182,7 @@ class SlackEventControllerTest {
 
     @Test
     void reminderZeroArg_returnsUsageWithoutCallingService() throws Exception {
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 리마인더","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 리마인더", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -168,10 +213,7 @@ class SlackEventControllerTest {
                 .thenReturn(new IntentResult("register_bug", 0.95, Map.of(), "버그있음"));
         when(issueCreateService.createFromSlackText(any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(IssueCreateResult.ok("P-1", "u")));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그있음","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그있음", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -216,10 +258,7 @@ class SlackEventControllerTest {
     void sprintCommand_dispatchesToSprintService() throws Exception {
         when(sprintReportService.generateReport())
                 .thenReturn(CompletableFuture.completedFuture(java.util.List.of("리포트")));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> sprint","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> scrum", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -233,10 +272,7 @@ class SlackEventControllerTest {
 
     @Test
     void helpCommand_sendsHelpText() throws Exception {
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> help","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> help", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -248,13 +284,48 @@ class SlackEventControllerTest {
     }
 
     @Test
+    void greeting_repliesWithHelp() throws Exception {
+        String body = appMentionEvent("<@U0BOT> 안녕", freshTs());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+        verify(slackNotifier).postThreadReply(any(), any(), msg.capture());
+        assertThat(msg.getValue())
+                .contains("안녕하세요")
+                .contains("솔루션 개발팀")
+                .contains("/jira/software/c/projects/SLAC/boards/7")
+                .contains("지라 사용법");
+        verify(issueCreateService, never()).createFromSlackText(any());
+        verify(issueCreateService, never()).createFromSlackText(any(), any());
+    }
+
+    @Test
+    void greetingWithContent_isNotTreatedAsGreeting() throws Exception {
+        // "안녕" 으로 시작해도 뒤에 내용이 붙으면 인사가 아니라 Haiku 분류로 넘어간다.
+        when(intentClassifier.classify(any()))
+                .thenReturn(new IntentResult("register_bug", 0.95, Map.of(), "안녕 안 되는 로그인 버그"));
+        when(issueCreateService.createFromSlackText(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(IssueCreateResult.ok("P-1", "u")));
+        String body = appMentionEvent("<@U0BOT> 안녕 안 되는 로그인 버그", freshTs());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        // 인사 안내가 아니라 분류기로 라우팅됨.
+        verify(slackNotifier, never()).postThreadReply(any(), any(), any());
+    }
+
+    @Test
     void myWorkCommand_dispatchesToMyReport() throws Exception {
         when(sprintReportService.generateMyReport(any()))
                 .thenReturn(CompletableFuture.completedFuture("내 작업"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 내작업","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 내작업", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -270,10 +341,7 @@ class SlackEventControllerTest {
     @Test
     void bugCommand_exact_queriesResolvedBugs() throws Exception {
         when(bugQueryService.queryResolvedBugs(any())).thenReturn(CompletableFuture.completedFuture("결과"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그","channel":"C1","ts":"2.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -287,10 +355,7 @@ class SlackEventControllerTest {
     @Test
     void bugQueryCommand_exact_queriesResolvedBugs() throws Exception {
         when(bugQueryService.queryResolvedBugs(any())).thenReturn(CompletableFuture.completedFuture("결과"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그조회","channel":"C1","ts":"2.1"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그조회", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -303,10 +368,7 @@ class SlackEventControllerTest {
     @Test
     void bugEnglishCommand_queriesResolvedBugs() throws Exception {
         when(bugQueryService.queryResolvedBugs(any())).thenReturn(CompletableFuture.completedFuture("결과"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> bug","channel":"C1","ts":"2.2"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> bug", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -319,10 +381,7 @@ class SlackEventControllerTest {
     @Test
     void bugWithDate_queriesResolvedBugsWithCorrectDate() throws Exception {
         when(bugQueryService.queryResolvedBugs(any())).thenReturn(CompletableFuture.completedFuture("결과"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그 2026.03.11","channel":"C1","ts":"2.3"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그 2026.03.11", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -340,10 +399,7 @@ class SlackEventControllerTest {
                 .thenReturn(new IntentResult("register_bug", 0.95, Map.of(), "버그 발생했어요"));
         when(issueCreateService.createFromSlackText(any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(IssueCreateResult.ok("P-1", "u")));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그 발생했어요","channel":"C1","ts":"2.4"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그 발생했어요", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -361,10 +417,7 @@ class SlackEventControllerTest {
         when(bugQueryService.queryResolvedBugs(any()))
                 .thenReturn(CompletableFuture.completedFuture(":bug: 결과"));
 
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그","channel":"C1","ts":"2.5"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -382,10 +435,7 @@ class SlackEventControllerTest {
         when(bugQueryService.queryResolvedBugs(any()))
                 .thenReturn(CompletableFuture.completedFuture("결과"));
 
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그","channel":"C1","ts":"2.6"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -404,10 +454,7 @@ class SlackEventControllerTest {
         when(bugQueryService.queryResolvedBugs(any()))
                 .thenReturn(CompletableFuture.completedFuture("결과"));
 
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그 2026.13.40","channel":"C1","ts":"2.7"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그 2026.13.40", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -423,10 +470,7 @@ class SlackEventControllerTest {
     void bugQuery_dashDateFormat_parsesCorrectly() throws Exception {
         when(bugQueryService.queryResolvedBugs(any()))
                 .thenReturn(CompletableFuture.completedFuture("결과"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그 2026-03-11","channel":"C1","ts":"2.8"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그 2026-03-11", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -442,10 +486,7 @@ class SlackEventControllerTest {
     void bugQuery_slashDateFormat_parsesCorrectly() throws Exception {
         when(bugQueryService.queryResolvedBugs(any()))
                 .thenReturn(CompletableFuture.completedFuture("결과"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 버그 2026/03/11","channel":"C1","ts":"2.9"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 버그 2026/03/11", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -461,10 +502,7 @@ class SlackEventControllerTest {
     void searchCommand_withKeyword_callsSearchService() throws Exception {
         when(issueSearchService.searchByKeyword("로그인"))
                 .thenReturn(CompletableFuture.completedFuture(":mag: \"로그인\" 검색 결과 (1건)"));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 검색 로그인","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 검색 로그인", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -477,10 +515,8 @@ class SlackEventControllerTest {
 
     @Test
     void searchCommand_withoutKeyword_sendsGuidance() throws Exception {
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 검색","channel":"C1","ts":"1.0"}}
-                """;
+        String ts = freshTs();
+        String body = appMentionEvent("<@U0BOT> 검색", ts);
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -488,17 +524,14 @@ class SlackEventControllerTest {
                 .andExpect(status().isOk());
 
         verify(issueRepository, never()).searchByKeyword(any(), any());
-        verify(slackNotifier).postThreadReply("C1", "1.0", ":mag: 검색어를 입력해주세요. 예: `@지라 검색 로그인`");
+        verify(slackNotifier).postThreadReply("C1", ts, ":mag: 검색어를 입력해주세요. 예: `@지라 검색 로그인`");
     }
 
     @Test
     void searchCommand_english_callsSearchService() throws Exception {
         when(issueSearchService.searchByKeyword("login"))
                 .thenReturn(CompletableFuture.completedFuture(":mag: \"login\" 검색 결과가 없습니다."));
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> search login","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> search login", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -515,10 +548,7 @@ class SlackEventControllerTest {
         when(issueSearchService.searchSemantic(any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(":mag: \"로그인 에러 관련 이슈 알려줘\" 검색 결과 (1건)\n• SLAC-7"));
 
-        String body = """
-                {"type":"event_callback","event":{
-                    "type":"app_mention","user":"U1","text":"<@U0BOT> 로그인 에러 관련 이슈 알려줘","channel":"C1","ts":"1.0"}}
-                """;
+        String body = appMentionEvent("<@U0BOT> 로그인 에러 관련 이슈 알려줘", freshTs());
 
         mockMvc.perform(post("/api/slack/event")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -527,6 +557,70 @@ class SlackEventControllerTest {
 
         verify(issueSearchService).searchSemantic(any(), any());
         verify(slackNotifier).postThreadReply(any(), any(), any());
+    }
+
+    // --- Epic creation routing ---
+
+    @Test
+    void epicKeyword_routesToEpicCreation_bypassingHaiku() throws Exception {
+        when(issueCreateService.createFromSlackText(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(IssueCreateResult.ok("ES2-9", "u")));
+        String body = appMentionEvent("<@U0BOT> 에픽 GCP marketplace 배포 확장", freshTs());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<IntentResult> intentCaptor = ArgumentCaptor.forClass(IntentResult.class);
+        verify(issueCreateService).createFromSlackText(any(), intentCaptor.capture());
+        assertThat(intentCaptor.getValue().intent()).isEqualTo("register_epic");
+        // 결정적 경로 — Haiku 분류를 거치지 않아야 한다.
+        verify(intentClassifier, never()).classify(any());
+    }
+
+    @Test
+    void englishEpicKeyword_routesToEpicCreation() throws Exception {
+        when(issueCreateService.createFromSlackText(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(IssueCreateResult.ok("ES2-9", "u")));
+        String body = appMentionEvent("<@U0BOT> create an epic for billing revamp", freshTs());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        verify(issueCreateService).createFromSlackText(any(), any());
+        verify(intentClassifier, never()).classify(any());
+    }
+
+    @Test
+    void nonEpicText_doesNotRouteToEpic_fallsThroughToHaiku() throws Exception {
+        when(intentClassifier.classify(any()))
+                .thenReturn(new IntentResult("register_bug", 0.95, Map.of(), "로그인 버그"));
+        when(issueCreateService.createFromSlackText(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(IssueCreateResult.ok("P-1", "u")));
+        String body = appMentionEvent("<@U0BOT> 로그인 버그 있어요", freshTs());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk());
+
+        // 에픽 키워드 없음 → Haiku 분류로 진행
+        verify(intentClassifier).classify(any());
+    }
+
+    @Test
+    void containsEpicKeyword_detectsWordBoundaries() {
+        assertThat(SlackEventController.containsEpicKeyword("에픽 만들어줘")).isTrue();
+        assertThat(SlackEventController.containsEpicKeyword("에픽을 추가해줘")).isTrue();
+        assertThat(SlackEventController.containsEpicKeyword("create epic for X")).isTrue();
+        assertThat(SlackEventController.containsEpicKeyword("EPIC 배포 확장")).isTrue();
+        assertThat(SlackEventController.containsEpicKeyword("로그인 버그 있어요")).isFalse();
+        assertThat(SlackEventController.containsEpicKeyword("epicenter 측정")).isFalse();
+        assertThat(SlackEventController.containsEpicKeyword(null)).isFalse();
+        assertThat(SlackEventController.containsEpicKeyword("")).isFalse();
     }
 
     @Test
@@ -538,5 +632,138 @@ class SlackEventControllerTest {
                 SlackEventController.stripMention("<@U0AT5U95C4T>  멀티스페이스")).isEqualTo("멀티스페이스");
         assertThat(
                 SlackEventController.stripMention(null)).isEmpty();
+    }
+
+    // --- 이슈 키 조회 카드 ---
+
+    @Test
+    void extractCardIssueKey_matchesKeyAloneAndWithFillers() {
+        assertThat(SlackEventController.extractCardIssueKey("ES2-123")).isEqualTo("ES2-123");
+        assertThat(SlackEventController.extractCardIssueKey("ES2-123 보여줘")).isEqualTo("ES2-123");
+        assertThat(SlackEventController.extractCardIssueKey("이슈 ES2-123 상세")).isEqualTo("ES2-123");
+        assertThat(SlackEventController.extractCardIssueKey("조회 ES2-123")).isEqualTo("ES2-123");
+        assertThat(SlackEventController.extractCardIssueKey("ES2-123 status?")).isEqualTo("ES2-123");
+    }
+
+    @Test
+    void extractCardIssueKey_rejectsSentencesAndMultipleKeys() {
+        // 키를 언급만 하는 서술문 — 이슈 생성/검색 흐름을 가로채면 안 된다.
+        assertThat(SlackEventController.extractCardIssueKey("ES2-123 때문에 빌드가 깨져요")).isNull();
+        assertThat(SlackEventController.extractCardIssueKey("ES2-1 ES2-2 비교해줘")).isNull();
+        assertThat(SlackEventController.extractCardIssueKey("로그인 페이지 500 에러")).isNull();
+        assertThat(SlackEventController.extractCardIssueKey("")).isNull();
+        assertThat(SlackEventController.extractCardIssueKey(null)).isNull();
+    }
+
+    @Test
+    void issueKeyCommand_localIssue_postsCardBlocks() throws Exception {
+        var issue = new com.jirabot.slack.entity.IssueEntity(
+                "SLAC-7", "로그인 500 에러", "버그", "진행 중", "진행 중",
+                "Alice", 2.0, null, "상세 설명", java.time.Instant.now(), java.time.Instant.now());
+        when(issueRepository.findByIssueKey("SLAC-7")).thenReturn(java.util.Optional.of(issue));
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(appMentionEvent("<@U0BOT> SLAC-7", freshTs())))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<String> blocks = ArgumentCaptor.forClass(String.class);
+        verify(slackNotifier).postBlockMessage(org.mockito.ArgumentMatchers.eq("C1"),
+                any(), any(), blocks.capture());
+        assertThat(blocks.getValue()).contains("SLAC-7").contains("진행 중").contains("Alice");
+        // 진행 중 카드 → 검토/완료 버튼 노출
+        assertThat(blocks.getValue()).contains(com.jirabot.slack.util.BlockKitBuilder.ACTION_IN_REVIEW);
+        verify(jiraApiClient, never()).getIssue(any());
+    }
+
+    @Test
+    void issueKeyCommand_unknownIssue_fallsBackToLiveThenNotFound() throws Exception {
+        when(issueRepository.findByIssueKey("SLAC-99")).thenReturn(java.util.Optional.empty());
+        when(jiraApiClient.getIssue("SLAC-99")).thenReturn(java.util.Optional.empty());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(appMentionEvent("<@U0BOT> SLAC-99", freshTs())))
+                .andExpect(status().isOk());
+
+        verify(jiraApiClient).getIssue("SLAC-99");
+        ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+        verify(slackNotifier).postThreadReply(any(), any(), msg.capture());
+        assertThat(msg.getValue()).contains("찾을 수 없");
+    }
+
+    // --- 담당자 지정 ---
+
+    @Test
+    void assignCommand_byName_assignsAndRepliesWithIssueKey() throws Exception {
+        var mapping = new com.jirabot.slack.entity.UserMappingEntity("U9", "홍길동S", "홍길동", "acc-77");
+        when(userMappingRepository.findByJiraDisplayName("홍길동")).thenReturn(java.util.Optional.of(mapping));
+        when(jiraApiClient.assignIssue("SLAC-7", "acc-77")).thenReturn(true);
+        when(issueRepository.findByIssueKey("SLAC-7")).thenReturn(java.util.Optional.empty());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(appMentionEvent("<@U0BOT> 할당 SLAC-7 홍길동", freshTs())))
+                .andExpect(status().isOk());
+
+        verify(jiraApiClient).assignIssue("SLAC-7", "acc-77");
+        ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+        verify(slackNotifier).postMessage(any(), msg.capture());
+        // 응답은 항상 대상 이슈 키를 명시한다 (스레드 모호성 안전장치).
+        assertThat(msg.getValue()).contains("SLAC-7").contains("홍길동");
+    }
+
+    @Test
+    void assignCommand_unregisteredMention_warnsWithoutAssigning() throws Exception {
+        when(userMappingRepository.findBySlackUserId("U5")).thenReturn(java.util.Optional.empty());
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(appMentionEvent("<@U0BOT> 할당 SLAC-7 <@U5>", freshTs())))
+                .andExpect(status().isOk());
+
+        verify(jiraApiClient, never()).assignIssue(any(), any());
+        ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+        verify(slackNotifier).postMessage(any(), msg.capture());
+        assertThat(msg.getValue()).contains("매핑이 없습니다");
+    }
+
+    @Test
+    void assignCommand_badFormat_showsUsage() throws Exception {
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(appMentionEvent("<@U0BOT> 할당 홍길동", freshTs())))
+                .andExpect(status().isOk());
+
+        verify(jiraApiClient, never()).assignIssue(any(), any());
+        ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+        verify(slackNotifier).postThreadReply(any(), any(), msg.capture());
+        assertThat(msg.getValue()).contains("사용법");
+    }
+
+    // --- 할당알림 토글 ---
+
+    @Test
+    void assignDmOnCommand_callsEnable() throws Exception {
+        when(reminderSubscriptionService.enableAssignDm("U1")).thenReturn(":bell: 할당 알림이 켜졌습니다.");
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(appMentionEvent("<@U0BOT> 할당알림 on", freshTs())))
+                .andExpect(status().isOk());
+
+        verify(reminderSubscriptionService).enableAssignDm("U1");
+    }
+
+    @Test
+    void assignDmOffCommand_callsDisable() throws Exception {
+        when(reminderSubscriptionService.disableAssignDm("U1")).thenReturn(":no_bell: 할당 알림이 꺼졌습니다.");
+
+        mockMvc.perform(post("/api/slack/event")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(appMentionEvent("<@U0BOT> 할당알림 off", freshTs())))
+                .andExpect(status().isOk());
+
+        verify(reminderSubscriptionService).disableAssignDm("U1");
     }
 }

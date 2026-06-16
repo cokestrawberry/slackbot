@@ -41,6 +41,51 @@ class BlockKitBuilderTest {
     }
 
     @Test
+    void buildIssueCreatedBlocks_withElapsed_appendsContextAsLastBlock() throws Exception {
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.BUG, 3, "Login 500 error", "summary");
+
+        String json = BlockKitBuilder.buildIssueCreatedBlocks(
+                "PROJ-1", "https://jira.example.com/browse/PROJ-1",
+                classification, List.of(), 12_340);
+
+        JsonNode blocks = mapper.readTree(json);
+        JsonNode last = blocks.get(blocks.size() - 1);
+        assertThat(last.path("type").asText()).isEqualTo("context");
+        assertThat(last.path("elements").get(0).path("text").asText()).contains("12.3초");
+    }
+
+    @Test
+    void buildIssueCreatedBlocks_withoutElapsed_hasNoContextBlock() throws Exception {
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.BUG, 3, "Login 500 error", "summary");
+
+        String json = BlockKitBuilder.buildIssueCreatedBlocks(
+                "PROJ-1", "https://jira.example.com/browse/PROJ-1",
+                classification, List.of(), -1);
+
+        JsonNode blocks = mapper.readTree(json);
+        for (JsonNode b : blocks) {
+            assertThat(b.path("type").asText()).isNotEqualTo("context");
+        }
+    }
+
+    @Test
+    void buildEpicCreatedBlocks_withElapsed_appendsContext() throws Exception {
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.EPIC, 0, "GCP 확장", "summary");
+
+        String json = BlockKitBuilder.buildEpicCreatedBlocks(
+                "PROJ-2", "https://jira.example.com/browse/PROJ-2",
+                classification, List.of(), 5_000);
+
+        JsonNode blocks = mapper.readTree(json);
+        JsonNode last = blocks.get(blocks.size() - 1);
+        assertThat(last.path("type").asText()).isEqualTo("context");
+        assertThat(last.path("elements").get(0).path("text").asText()).contains("5.0초");
+    }
+
+    @Test
     void buildIssueCreatedBlocks_withSimilar_includesWarningSection() throws Exception {
         var classification = new IssueClassification(
                 IssueClassification.IssueType.FEATURE, 5, "Dark mode", "summary");
@@ -75,6 +120,48 @@ class BlockKitBuilderTest {
         JsonNode confirm = quickDoneButton.path("confirm");
         assertThat(confirm.isMissingNode()).isFalse();
         assertThat(confirm.path("title").path("text").asText()).isEqualTo("확인");
+    }
+
+    @Test
+    void buildEpicCreatedBlocks_hasNoActionButtons() throws Exception {
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.EPIC, 0, "GCP marketplace 배포 확장", "summary");
+
+        String json = BlockKitBuilder.buildEpicCreatedBlocks(
+                "ES2-50", "https://jira.example.com/browse/ES2-50",
+                classification, List.of());
+
+        JsonNode blocks = mapper.readTree(json);
+        // 에픽은 정보 Section 1개만 — 워크플로 버튼 없음
+        assertThat(blocks.size()).isEqualTo(1);
+        for (JsonNode block : blocks) {
+            assertThat(block.path("type").asText()).isNotEqualTo("actions");
+        }
+        String text = blocks.get(0).path("text").path("text").asText();
+        assertThat(text).contains("ES2-50");
+        assertThat(text).contains("EPIC");
+        assertThat(text).contains("GCP marketplace 배포 확장");
+    }
+
+    @Test
+    void buildEpicCreatedBlocks_withSimilar_includesWarningButStillNoButtons() throws Exception {
+        var classification = new IssueClassification(
+                IssueClassification.IssueType.EPIC, 0, "결제 개편", "summary");
+        IssueEntity similar = new IssueEntity("ES2-10", "결제 리팩토링", "에픽",
+                "진행 중", "진행 중", null, 0.0, "reporter", "desc",
+                Instant.now(), Instant.now());
+
+        String json = BlockKitBuilder.buildEpicCreatedBlocks(
+                "ES2-51", "https://jira.example.com/browse/ES2-51",
+                classification, List.of(similar));
+
+        JsonNode blocks = mapper.readTree(json);
+        // 정보 Section + 유사 경고 Section = 2, 액션 블록은 없음
+        assertThat(blocks.size()).isEqualTo(2);
+        for (JsonNode block : blocks) {
+            assertThat(block.path("type").asText()).isNotEqualTo("actions");
+        }
+        assertThat(blocks.get(1).path("text").path("text").asText()).contains("ES2-10");
     }
 
     @Test

@@ -17,18 +17,30 @@ public interface IssueRepository extends JpaRepository<IssueEntity, Long> {
 
     Optional<IssueEntity> findByIssueKey(String issueKey);
 
-    // STUDY: JPQL의 LOWER + LIKE로 대소문자 무시 키워드 검색.
-    //        완료된 이슈는 제외하여 활성 이슈만 비교 대상으로 삼는다.
-    @Query("SELECT i FROM IssueEntity i WHERE LOWER(i.summary) LIKE LOWER(CONCAT('%', :keyword, '%')) " +
-           "AND i.statusCategory <> '완료'")
-    List<IssueEntity> findBySummaryContaining(@Param("keyword") String keyword);
-
     List<IssueEntity> findByAssigneeContaining(String name);
 
     List<IssueEntity> findByStatusCategoryNot(String statusCategory);
 
-    // STUDY: 일일 리마인더용. 특정 담당자(Jira displayName)의 미완료 이슈 목록.
-    List<IssueEntity> findByAssigneeAndStatusCategoryNot(String assignee, String statusCategory);
+    // STUDY: 내작업 조회 — 기존 findAll() 전체 로드 + Java 필터를 DB 쿼리로 대체 (메모리/지연 절감).
+    //        의미는 ScrumReportServiceImpl.isMyIssue 와 동일: reporter 가 Slack ID 와 정확히 일치(봇 생성 직후)
+    //        OR reporter/assignee 가 Jira displayName 을 포함(LIKE — 기존 contains() 와 동일하게 대소문자 구분).
+    @Query("SELECT i FROM IssueEntity i WHERE i.reporter = :slackUserId " +
+           "OR i.reporter LIKE CONCAT('%', :jiraName, '%') " +
+           "OR i.assignee LIKE CONCAT('%', :jiraName, '%')")
+    List<IssueEntity> findMyIssues(@Param("slackUserId") String slackUserId,
+                                   @Param("jiraName") String jiraName);
+
+    // 내작업 — Jira 이름 미해석(매핑 없음) 시 봇 생성 이슈(reporter=Slack ID)만.
+    List<IssueEntity> findByReporter(String reporter);
+
+    // STUDY: 시맨틱 검색의 Claude 컨텍스트 상한용 — 최근 갱신순 상위 N건만 (findAll 전체 로드 대체).
+    List<IssueEntity> findAllByOrderByJiraUpdatedDesc(Pageable pageable);
+
+    // STUDY: Jira 에서 삭제 확인된 이슈를 키 목록으로 일괄 삭제 (prune). 파생 delete 쿼리.
+    long deleteByIssueKeyIn(java.util.Collection<String> issueKeys);
+
+    // STUDY: 현재 스프린트의 미완료 이슈 — 일일 리마인더(스프린트 범위) 용. statusCategory <> '완료' AND sprint_id = ?.
+    List<IssueEntity> findByStatusCategoryNotAndSprintId(String statusCategory, Integer sprintId);
 
     // STUDY: 다수 담당자의 미완료 이슈를 단일 IN 쿼리로 가져온다 — 일일 리마인더의 N+1 패턴 회피용.
     List<IssueEntity> findByAssigneeInAndStatusCategoryNot(java.util.Collection<String> assignees,
@@ -115,9 +127,11 @@ public interface IssueRepository extends JpaRepository<IssueEntity, Long> {
     //        이번 sync 에 포함되지 않은 키를 일괄 삭제한다. @Modifying 은 SELECT 가 아닌 쿼리에 필수.
     //        봇이 직접 생성한 이슈 (slack_channel IS NOT NULL) 는 아직 board backlog API 가 인덱싱하기
     //        전이라도 절대 지우지 않는다 — Slack 스레드 연결이 끊기는 사고 방지.
+    //        또한 완료된 이슈(completedAt IS NOT NULL)는 추이/통계 히스토리용으로 보존한다 — 백필로 적재한
+    //        과거 완료 이슈도 이 조건 덕에 다음 백로그 sync 에서 지워지지 않는다.
     @Modifying
     @Query("DELETE FROM IssueEntity i WHERE i.sprintId IS NULL AND i.slackChannel IS NULL " +
-           "AND i.issueKey NOT IN :keys")
+           "AND i.completedAt IS NULL AND i.issueKey NOT IN :keys")
     int deleteStaleBacklog(@Param("keys") Collection<String> keys);
 
     List<IssueEntity> findBySprintId(Integer sprintId);
