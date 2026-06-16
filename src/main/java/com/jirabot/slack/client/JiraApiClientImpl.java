@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jirabot.slack.client.dto.IssueClassification;
 import com.jirabot.slack.client.dto.JiraCreateResponse;
-import com.jirabot.slack.client.dto.JiraSearchHit;
 import com.jirabot.slack.client.dto.SprintInfo;
 import com.jirabot.slack.client.dto.SprintIssue;
 import com.jirabot.slack.config.JiraProperties;
@@ -516,57 +515,6 @@ public class JiraApiClientImpl implements JiraApiClient {
         } catch (Exception e) {
             log.error("Failed to append description to {}: {}", issueKey, e.toString());
             throw new JiraApiException("Description update failed: " + e.getMessage(), e);
-        }
-    }
-
-    @Override
-    public List<JiraSearchHit> searchByText(String query, int maxResults) {
-        // STUDY: Jira REST /rest/api/3/search 는 Jira UI 의 Advanced Search 와 동일한 JQL 엔진을 사용한다.
-        //        text ~ "..." 연산자는 summary / description / comment 풀텍스트 매칭이므로 DB 사전 동기화 없이도
-        //        실시간 전체 검색이 가능하다. 본인 토큰의 권한 범위가 곧 검색 가시 범위.
-        if (query == null || query.isBlank()) {
-            return List.of();
-        }
-        try {
-            // STUDY: JQL 문자열 안에서 큰따옴표는 백슬래시로 escape 해야 한다.
-            //        백슬래시 자체와 역따옴표류는 매우 드문 케이스이므로 따옴표만 우선 처리한다.
-            String safeQuery = query.replace("\\", "\\\\").replace("\"", "\\\"");
-            // STUDY: statusCategory != Done 으로 완료/종료/Closed/Resolved 등 모든 종결 상태를 한 번에 제외한다.
-            //        status name 은 사이트 언어/워크플로마다 달라(완료/종료/Done/Closed/Resolved) 카테고리 기준이 안전.
-            String jql = String.format(
-                    "project = %s AND statusCategory != Done AND text ~ \"%s\" ORDER BY updated DESC",
-                    props.projectKey(), safeQuery);
-
-            // STUDY: Atlassian 이 /rest/api/3/search 를 제거하고 /rest/api/3/search/jql 로 일원화함 (CHANGE-2046).
-            //        응답 스키마의 issues[] 는 동일하게 유지되어 파싱 로직은 그대로 사용 가능.
-            String json = jiraWebClient.get()
-                    .uri(uri -> uri.path("/rest/api/3/search/jql")
-                            .queryParam("jql", jql)
-                            .queryParam("fields", "summary,status,assignee")
-                            .queryParam("maxResults", Math.max(1, Math.min(maxResults, 50)))
-                            .build())
-                    .retrieve().bodyToMono(String.class).block();
-
-            JsonNode root = objectMapper.readTree(json);
-            JsonNode issues = root.path("issues");
-            List<JiraSearchHit> hits = new ArrayList<>();
-            for (JsonNode issue : issues) {
-                JsonNode f = issue.path("fields");
-                JsonNode assigneeNode = f.path("assignee");
-                String assignee = (assigneeNode.isMissingNode() || assigneeNode.isNull())
-                        ? null : assigneeNode.path("displayName").asText(null);
-                hits.add(new JiraSearchHit(
-                        issue.path("key").asText(),
-                        f.path("summary").asText(""),
-                        f.path("status").path("name").asText(""),
-                        assignee));
-            }
-            log.info("Jira search ok query='{}' jql='{}' hits={}", query, jql, hits.size());
-            return hits;
-        } catch (Exception e) {
-            // STUDY: 검색 실패는 운영을 막을 만한 사유가 아니므로 warn 로그만 남기고 빈 결과 반환.
-            log.warn("Jira search failed for query '{}': {}", query, e.toString());
-            return List.of();
         }
     }
 

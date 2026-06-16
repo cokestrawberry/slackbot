@@ -222,7 +222,7 @@ public class SlackEventController {
         // 1차: 키워드 매칭 (스레드 안밖 모두 동작)
         switch (lower) {
             case "help", "도움말" -> { handleHelp(event); return; }
-            case "sprint", "스프린트" -> { handleSprint(event); return; }
+            case "scrum", "스크럼" -> { handleSprint(event); return; }
             case "내작업", "my" -> { handleMyWork(event); return; }
             case "sync", "동기화" -> { handleSync(event); return; }
             case "완료", "done" -> { handleComplete(event); return; }

@@ -2,7 +2,6 @@ package com.jirabot.slack.client;
 
 import com.jirabot.slack.client.dto.IssueClassification;
 import com.jirabot.slack.client.dto.JiraCreateResponse;
-import com.jirabot.slack.client.dto.JiraSearchHit;
 import com.jirabot.slack.client.dto.SprintInfo;
 import com.jirabot.slack.client.dto.SprintIssue;
 import java.util.List;
