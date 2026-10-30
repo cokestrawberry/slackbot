@@ -77,3 +77,69 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 
 .toggle { cursor: pointer; font-size: 16px; background: none; border: none; }
 footer { text-align: center; padding: 16px; border-top: 1px solid var(--border); margin-top: 32px; }
+
+/* ===== 2단 탭 (v0.0.70) ===== */
+#top-tabs { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--border); }
+.top-tab { background: none; border: none; color: var(--muted); font-size: 15px; font-weight: 700;
+  padding: 10px 18px; cursor: pointer; border-radius: 8px 8px 0 0; }
+.top-tab:hover { color: var(--text); }
+.top-tab.active { color: var(--text); background: var(--panel); border: 1px solid var(--border); border-bottom: none; }
+#tabs { padding-top: 8px; }
+
+/* ===== 아티팩트 갤러리 (v0.0.71) — Claude 아티팩트 카드 스타일 ===== */
+.art-upload { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 20px; margin-bottom: 20px; }
+.art-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.art-form input[type="text"] { flex: 1; min-width: 220px; }
+/* ===== 아티팩트 주제 폴더 (v0.0.86) — 왼쪽 목록 + 오른쪽 업로드/그리드 ===== */
+.art-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.art-folders { width: 220px; flex-shrink: 0; position: sticky; top: 12px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+.art-main { flex: 1; min-width: 320px; }
+.art-folder { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 6px;
+  cursor: pointer; font-size: 14px; user-select: none; }
+.art-folder:hover { background: var(--bg); }
+.art-folder.active { background: rgba(68, 147, 248, .18); color: var(--accent); font-weight: 600; }
+.art-folder.drop-target { outline: 2px dashed var(--accent); background: rgba(68, 147, 248, .1); }
+.art-folder .f-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-folder .f-count { margin-left: auto; color: var(--muted); font-size: 12px; }
+/* ✏️🗑 는 항상 자리를 차지하고(visibility) 줄 맨 오른쪽에 둔다 — display:none→inline 으로 hover 시
+   튀어나오면 레이아웃이 밀려 "폴더 클릭"이 🗑 에 맞는 오클릭이 생긴다(v0.0.86 브라우저 검증에서 발견).
+   선택된 폴더에서는 항상 보이게 해 터치 기기(hover 없음)에서도 쓸 수 있다. */
+.art-folder .f-act { visibility: hidden; background: none; border: 0; cursor: pointer; font-size: 12px; padding: 0 2px; }
+.art-folder:hover .f-act, .art-folder.active .f-act { visibility: visible; }
+.art-folders hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+.art-folder-add { width: 100%; margin-top: 6px; font-size: 13px; }
+/* 카드 ⋯ 메뉴 (v0.0.87) — 버튼 줄 대신 제목 옆 ⋯ 하나 */
+.art-title-row { display: flex; align-items: center; gap: 6px; }
+.art-title-row .art-title { flex: 1; min-width: 0; }
+.art-more { background: none; border: 1px solid transparent; color: var(--muted); border-radius: 6px;
+  cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 8px; flex-shrink: 0; }
+.art-more:hover { border-color: var(--border); color: var(--text); background: var(--bg); }
+.art-menu { position: fixed; z-index: 1000; min-width: 190px; max-height: 70vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45); }
+.art-menu-item { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text);
+  padding: 7px 10px; border-radius: 5px; cursor: pointer; font-size: 13px; }
+.art-menu-item:hover:not(:disabled) { background: var(--bg); }
+.art-menu-item:disabled { color: var(--muted); cursor: default; }
+.art-menu-item.sub { padding-left: 22px; }
+.art-menu-item.danger { color: var(--red); border-top: 1px solid var(--border); border-radius: 0 0 5px 5px; margin-top: 2px; }
+.art-menu-label { color: var(--muted); font-size: 11px; padding: 6px 10px 2px; }
+.art-card[draggable="true"] { cursor: grab; }
+.art-card.dragging { opacity: .4; }
+@media (max-width: 760px) { .art-folders { width: 100%; position: static; } }
+.art-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.art-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  overflow: hidden; transition: border-color .15s, transform .15s; }
+.art-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.art-preview { height: 170px; overflow: hidden; background: #fff; cursor: pointer; position: relative; }
+.art-preview iframe { width: 400%; height: 400%; transform: scale(0.25); transform-origin: 0 0;
+  border: none; pointer-events: none; }
+.art-meta { padding: 10px 12px; border-top: 1px solid var(--border); }
+.art-title { font-weight: 700; cursor: pointer; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.art-title:hover { color: var(--accent); }
+.art-sub { font-size: 12px; margin: 4px 0 8px; }
+.art-actions { display: flex; gap: 6px; }
+.art-actions .btn { font-size: 12px; padding: 4px 10px; }

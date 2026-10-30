@@ -108,6 +108,459 @@ Slack/Jira webhook 경로는 기존과 동일하게 무인증(각자 서명/toke
 토큰으로 호출돼 webhook actor 가 항상 토큰 소유자로 기록되므로(실제 클릭자와 무관) "변경자: @토큰소유자"가
 오해를 줬다. 버튼 클릭 시 원본 메시지는 `buildTransitionedBlocks` 가 실제 클릭자 이름으로 이미 갱신한다.
 
+### Safari "The string did not match the expected pattern." 대시보드 오류 (v0.0.89)
+
+ngrok 경고 통과 쿠키가 없는 요청(쿠키 만료·Safari 쿠키 정책·시크릿 창)에 ngrok 이 **200 + 경고 페이지 HTML**
+을 돌려줘, 대시보드가 데이터(JSON)를 읽다 실패했다 (Safari 의 메시지가 위 문구). 대시보드·리뷰 페이지의
+모든 API 요청(`apiFetch`)에 ngrok 공식 우회 헤더 `ngrok-skip-browser-warning` 를 붙여 쿠키와 무관하게 통과.
+JSON 이 아닌 응답이 오면 알아보기 쉬운 한글 오류를 보여준다.
+- 한계: 페이지 이동·스크립트·이미지 같은 브라우저가 직접 하는 요청에는 헤더를 붙일 수 없어, 그쪽은 여전히
+  ngrok 쿠키에 의존한다 (근본 해결은 ngrok 경고 페이지 제거).
+
+### 리뷰 페이지가 시크릿 창에서 잘리던 문제 (v0.0.88)
+
+리뷰 페이지의 아티팩트가 맨 위 150px 만 보이고 댓글(드래그)이 안 되던 문제. 원인: 댓글 에이전트를 외부
+`<script src>` 로 불러왔는데, 보안 격리 문서 안의 요청은 타사 요청이라 **시크릿 창(타사 쿠키 차단)** 에서는
+ngrok 경고 통과 쿠키가 빠지고 ngrok 이 스크립트 대신 경고 페이지를 돌려줬다.
+- 에이전트를 HTML 에 **인라인** 주입 (`<script data-sol-comment-agent>`) — 요청이 없어 쿠키·인증·광고차단 무관.
+- 남은 한계: 자산 폴더(page_files)가 있는 아티팩트의 이미지·CSS 는 여전히 별도 요청이라, 타사 쿠키 차단
+  브라우저에서는 ngrok 경고 페이지 때문에 빠질 수 있다 → 근본 해결은 ngrok 경고 페이지 제거(유료/자체 도메인).
+
+### 아티팩트 카드 정리 — ⋯ 메뉴 (v0.0.87)
+
+카드 아래 버튼 줄(🔗 링크 복사 · 💬 · ✏️ · 🗑 · 📁 폴더 드롭다운)을 없애고, 카드에는 미리보기·제목·정보와
+제목 옆 **⋯ 하나**만 둔다. ⋯ 메뉴: 링크 복사 / 내용 수정 / 폴더 이동(현재 폴더 ✓) / 삭제.
+- 댓글은 카드 클릭으로 열리는 리뷰 페이지에서 (💬 개수 배지는 카드에서 제거).
+- 폴더 이동은 ⋯ 메뉴 또는 왼쪽 폴더로 드래그 앤 드롭.
+
+### 아티팩트 주제별 폴더 (v0.0.86)
+
+아티팩트 탭 왼쪽에 주제 폴더 목록(📚 전체 / 📥 미분류 / 📁 폴더들)을 두고 폴더별로 정리한다.
+- 한 단계 폴더, 아티팩트는 한 폴더에만 속함 (`artifacts.folder_id`, NULL = 미분류). Flyway V9.
+- 옮기기: 카드의 ⋯ 메뉴(v0.0.87~, 초기엔 [📁] 드롭다운) 또는 카드를 왼쪽 폴더로 **드래그 앤 드롭** (`PATCH /api/artifacts/{id}/folder`).
+- 특정 폴더를 보고 있을 때 업로드하면 그 폴더로 바로 올라감 (업로드 선택 파라미터 `folderId`).
+- 폴더 만들기·이름 변경은 로그인한 누구나, **삭제는 관리자만** — 삭제 시 안의 아티팩트는 DB FK
+  (`ON DELETE SET NULL`)로 미분류 복귀. 이름은 대소문자 무시 중복 금지, 1~50자.
+- 폴더별 개수·필터는 이미 받아온 목록으로 브라우저에서 계산 (추가 요청 없음). 마지막 선택 폴더 기억.
+
+### 기억된 옛 로그인 일괄 무효화 — realm 변경 (v0.0.85)
+
+브라우저는 Basic 로그인 정보를 "사이트 + realm 이름" 단위로 기억해, 폐지된 공용 `sol/sol` 이 남아 있는
+사람이 있었다. realm 을 `sol dashboard` → `sol dashboard 2` 로 바꿔 **모든 브라우저에 로그인 창이 새로
+뜨게** 했다 (전원 1회 재로그인).
+- `.env` `DASHBOARD_AUTH_REALM` 으로 설정 가능 — 앞으로 계정 정책이 바뀌면 값만 바꿔 재시작하면 전원 재로그인.
+- Basic 방식 특성상 "접속할 때마다 로그인" 은 불가 (브라우저를 닫을 때까지 기억).
+
+### 대시보드 접속 문제 수정 (v0.0.84)
+
+다른 사람들에게 대시보드가 깨지거나 막혀 보이던 원인 수정 (ngrok 접속 기록으로 확인).
+- **`/dashboard`(끝 `/` 없음) 화면 깨짐**: forward 라 주소가 그대로 남아 상대경로 `style.css`·`app.js`
+  가 `/style.css`·`/app.js` 로 풀려 404 → CSS·JS 없는 화면. `/dashboard/` 로 redirect 하도록 수정.
+- **도메인만 입력하면 "404 page not found"**: Go 봇이 루트 `/` 를 `/dashboard/` 로 redirect (루트 정확
+  일치 `/{$}` — 다른 미등록 경로는 계속 404).
+- **업로드 스킬**: 폐지된 `sol:sol` 기본값 제거, 본인 계정(`ARTIFACT_SERVER_AUTH`) 필수로 안내.
+- 코드로 못 고치는 것: 무료 ngrok 의 첫 방문 경고 페이지 — "Visit Site" 클릭 안내 필요.
+  공용 `sol` 계정 폐지 후 계정이 없는 사람은 관리자가 회원 관리 탭에서 만들어 줘야 함.
+
+### 아티팩트 올린 사람 = 로그인 계정 (v0.0.83)
+
+아티팩트 업로드 시 올린 사람을 로그인 계정 이름으로 자동 기록한다 (댓글 v0.0.81 과 같은 규칙).
+- 요청의 `author` 는 무시 — 같은 사람이 "김영현"/"yhkim"/"YeongHyeonKim"/빈 값으로 제각각
+  기록되던 문제 해소, 사칭 방지.
+- 수정(PUT)은 최초 업로더를 유지. 올린 사람이 비어 있던 옛 데이터만 수정한 사람으로 채운다.
+- 리뷰 페이지 상단 제목 옆에 "· 올린 사람 이름" 표시 (갤러리 카드에는 기존대로 표시).
+- 기존 아티팩트 9건은 실제로 모두 관리자가 올린 것이라 DB 에서 "김영현" 으로 일괄 정리(1회성 데이터 수정).
+
+### 사용자 관리 탭 관리자 전용 (v0.0.82)
+
+대시보드 "사용자 관리" 탭(Slack↔Jira·GitHub↔Jira 매핑, 리마인더/할당알림 토글)을 관리자만 볼 수 있다.
+- 탭은 관리자에게만 표시되고, 서버도 `/api/user-mappings/**`·`/api/github-mappings/**` 를 ROLE_ADMIN
+  으로 막는다 (일반 사용자 조회·변경 모두 403).
+- 일반 사용자의 본인 리마인더 on/off 는 기존처럼 Slack 명령(`@지라 리마인더 on/off`)으로 가능.
+- `scripts/register-user-mapping.sh`: v0.0.73 이후 인증이 없어 실패하던 것을 `.env` 관리자 계정으로 인증하도록 수정.
+
+### 댓글 작성자 = 로그인 계정 (v0.0.81)
+
+아티팩트 댓글/답글의 작성자를 직접 입력하지 않는다 — 서버가 로그인 계정의 이름(회원 관리에 등록한 이름,
+관리자는 `DASHBOARD_ADMIN_NAME`)으로 정한다. 요청 body 의 `author` 는 무시해 사칭을 막는다.
+- 리뷰 페이지의 이름 입력칸·localStorage 제거, 상단에 "👤 내 이름" 표시.
+- 이름은 작성 시점 스냅샷으로 저장 — 이후 계정 이름 변경·삭제와 무관하게 과거 댓글 작성자 유지.
+- 기존 댓글(이 버전 이전, 작성자 미입력)은 그대로 "익명" 으로 표시된다 (작성자를 알 수 없어 소급 불가).
+
+### 관리자 표시 이름 설정 (v0.0.80)
+
+관리자 계정의 헤더 이름이 "관리자" 고정이던 것을 `.env` `DASHBOARD_ADMIN_NAME` 으로 설정 가능하게 함
+(기본 "관리자"). 관리자 아이디/비밀번호는 `DASHBOARD_USER/PASSWORD` — 바꾸면 Spring·Go 봇 재시작 필요.
+
+### 대시보드 사용자 계정 — 관리자가 직접 생성 (v0.0.79)
+
+sol 하나뿐이던 대시보드 계정을 사람별로 나눈다. 가입 페이지 없이 **관리자(sol)가 "회원 관리" 탭에서
+이름/아이디/비밀번호로 계정을 만들고**, 본인은 그 아이디로 로그인한다 (로그인 방식은 기존 브라우저
+팝업 = HTTP Basic 그대로).
+- 관리자: `.env` `DASHBOARD_USER/PASSWORD`(sol) = ROLE_ADMIN. 일반 사용자: `dashboard_users`
+  (Flyway V8) = ROLE_USER — 기능은 관리자와 동일, **회원 관리(`/api/admin/**`)만 관리자 전용(403)**.
+- 회원 관리 탭: 생성, 비밀번호 초기화, 비활성화/활성화(다음 요청부터 즉시 반영), 삭제.
+  "평소 사용하지 않는 간단한 비밀번호" 경고 표시. 헤더에 로그인 사용자 이름 표시(`/api/dashboard/me`).
+- 비밀번호: BCrypt 해시 저장(`DelegatingPasswordEncoder`, 관리자는 `{noop}`). Basic 인증은 매 요청
+  검증하므로 `CachingPasswordEncoder` 가 **성공한 검증만** 10분 캐시 — 비밀번호를 바꾸면 해시가
+  달라져 자동 무효, 실패는 캐시하지 않음.
+- Go 프록시: sol/sol 비교 인증 제거 → 순수 전달 (인증은 Spring 전담). `/api/admin/` 경로 추가.
+- 한계: Basic 인증 특성상 **로그아웃이 없다** — 다른 계정으로 바꾸려면 시크릿 창이나 브라우저 재시작.
+  본인 비밀번호 변경은 미지원(관리자 초기화).
+
+### 평일 아침 "오늘의 부탁" 채널 메시지 (v0.0.78)
+
+평일(월~금) 09:30 KST 에 `C06702A7BPD` 채널로 "오늘의 부탁" 안내 메시지를 자동 발송한다.
+- 문구: `src/main/resources/messages/daily-prompt.txt` (Slack mrkdwn). `DAILY_PROMPT_MESSAGE_FILE`
+  로 외부 파일을 지정하면 재빌드 없이 파일만 고쳐 다음 발송부터 반영.
+- 설정(env): `DAILY_PROMPT_CHANNEL`, `DAILY_PROMPT_CRON`(기본 `0 30 9 * * MON-FRI`),
+  `DAILY_PROMPT_ZONE`, `DAILY_PROMPT_ENABLED=false` 로 비상 차단. 채널이 비면 발송 생략.
+- 공휴일은 구분하지 않는다(평일이면 발송).
+- `SlackNotifier.postMessage` 가 Slack 의 `ok:false`(HTTP 200) 응답을 경고 로그로 남기도록 개선 —
+  기존엔 not_in_channel 등이 조용히 누락됐다.
+
+### 리뷰 탭 제목 = 아티팩트 제목 (v0.0.77)
+
+리뷰 페이지의 브라우저 탭 제목이 "아티팩트 리뷰" 고정이던 것을 아티팩트 제목으로 표시
+(`document.title` 갱신 — 탭 여러 개 열었을 때 구분 가능).
+
+### 리뷰 페이지가 기본 진입점 (v0.0.76)
+
+- 대시보드 카드 클릭·🔗 링크 복사가 전부 **리뷰 페이지**(`/artifacts/review/{id}` — 문서+댓글)를
+  가리킨다. 사용자들이 view 링크에서 댓글을 시도하는 혼란 제거.
+- 리뷰 페이지 상단에 **[원본 보기]** 버튼 — 댓글 UI 없는 순수 뷰어(`/artifacts/view/{id}/`) 새 탭.
+- artifact-upload 스킬의 공유 산출물도 리뷰 링크로 변경.
+
+### 아티팩트 인라인 댓글 — 드래그 코멘트 (v0.0.75)
+
+아티팩트 뷰어에서 텍스트를 드래그해 Google Docs 처럼 우측 레일에 댓글을 단다. 대댓글(1단계),
+[완료]로 댓글+하이라이트 소멸, 완료 댓글은 토글로 다시 보기(되돌리기 가능).
+- **진입점**: 갤러리 카드의 `💬 N`(미해결 루트 댓글 수) 버튼 → 새 탭 `/artifacts/review/{id}`
+  (Spring 이 `index.html?id=` 로 302). 인증된 일반 origin 페이지가 사이드바+API 를 담당.
+- **아키텍처(sandbox 유지)**: 아티팩트 HTML 은 여전히 CSP `sandbox allow-scripts`(고유 origin)로
+  서빙되어 문서 스크립트가 API 를 못 부른다. 대신 뷰어 응답 `</body>` 앞에 **주입 에이전트**
+  (`/artifacts/view/{id}/__comment-agent.js`)가 들어가 선택 캡처·앵커링·하이라이트를 하고,
+  부모 리뷰 페이지와 **postMessage** 로만 통신한다(Hypothesis 패턴). 에이전트는 부모의 `init`
+  이 오기 전엔 `ready` 만 보내고 휴면 — 일반 뷰어·카드 미리보기엔 영향 0.
+- **앵커**: W3C TextQuoteSelector — quote(≤500자)+prefix/suffix(32자). `prefix+quote+suffix` 정확
+  일치 → quote 후보 문맥점수 최고순. 하이라이트는 CSS Custom Highlight API(`::highlight`)로 DOM 무변조.
+- **XFO 변경**: 뷰어/자산 응답에 `X-Frame-Options: SAMEORIGIN` 명시 — Security 기본 DENY 가
+  리뷰 iframe 을 막던 것 + **갤러리 카드 미리보기 잠복 버그(v0.0.71~)도 함께 수정**.
+- **API**: `/api/artifacts/{artifactId}/comments` (GET/POST/PATCH/DELETE). 테이블 `artifact_comments`
+  (Flyway V7, `parent_id` 자기참조 CASCADE). 댓글 body/author/quote 는 리뷰 페이지에서 전부 `esc()`.
+- **한계**: CSS Custom Highlight API 미지원 브라우저는 하이라이트만 없이 나머지는 동작.
+  HTML 을 PUT 으로 수정해 인용 위치가 사라지면 "원문 위치를 찾을 수 없음" 고아 카드로 잔존.
+
+### 아티팩트 제자리 수정 — 같은 링크 유지 (v0.0.74)
+
+이미 올린 아티팩트를 새 URL 없이 수정할 수 있다 (`PUT /api/artifacts/{id}`, JSON/멀티파트 둘 다).
+- **PUT = 전체 교체**: html·제목·작성자 교체, 자산은 보낸 것으로 통째 교체(안 보내면 삭제).
+  제목 미지정 시 새 `<title>` → 파일명 → 기존 제목 유지. id/생성일/공유 링크 불변.
+- 대시보드 카드에 ✏️ 버튼 — 클릭하면 업로드 폼이 수정 모드로 전환([수정하기]/[수정 취소]).
+- 자산 응답의 `Cache-Control: max-age=3600` 제거 — 수정 직후 구버전 자산이 보이는 것 방지.
+- 자산 교체는 `@Modifying` 벌크 삭제 후 saveAll — 파생 deleteBy 는 Hibernate flush 가
+  INSERT 를 먼저 실행해 UNIQUE(artifact_id, path) 위반이 나는 함정 회피.
+- artifact-upload 스킬에 "케이스 3 — 기존 아티팩트 수정" 추가.
+
+### 대시보드 전면 로그인 필수화 (v0.0.73)
+
+어느 경로로 접근하든(**ngrok 터널·사내망 :8080 직접 모두**) 대시보드는 로그인이 필요하다.
+- Spring 에 httpBasic(realm "sol dashboard") 활성화 — 계정은 Go 프록시와 같은
+  `.env` `DASHBOARD_USER`/`DASHBOARD_PASSWORD`. 터널 경유 시 Authorization 헤더가
+  그대로 전달되므로 이중 입력 없음.
+- **아티팩트 뷰어(`/artifacts/view/**`)도 로그인 대상** — 무인증 링크 공유는 중단
+  (사용자 결정). Go `PublicProxy` 제거. CSP sandbox XSS 방어는 유지.
+- `DASHBOARD_USER`/`DASHBOARD_PASSWORD` 는 이제 **기동 필수 env** (누락 시 fail-fast,
+  6→8개). docker-compose 는 `env_file: .env` 로 이미 전달됨.
+- 무인증 유지: `/health`·`/actuator/health`·`/actuator/info`(스크립트·워치독·봇상태 카드),
+  `/api/slack/**`(HMAC), `/api/jira/**`(?token=).
+- 알려진 한계: Basic 인증은 브라우저가 자동 첨부하므로 CSRF 성 form POST 가 이론상 가능
+  (JSON 엔드포인트는 415 로 무해). 기존 무인증 LAN 모델보다 엄격히 개선된 것으로 수용.
+
+### 아티팩트 폴더 업로드 — page_files 자산 지원 (v0.0.72)
+
+웹페이지/아티팩트를 저장하면 나오는 `page.html` + 자산 폴더(`page_files/` — 이미지·CSS·JS)를 함께
+올릴 수 있다. HTML 안의 상대 참조가 뷰어에서 그대로 동작한다.
+- **URL 스킴 변경**: 정식 공개 링크는 `/artifacts/view/{id}/` (trailing slash — 상대 참조 기준).
+  기존 형식 `/artifacts/view/{id}` 는 301 리다이렉트로 계속 동작. 자산은 `/artifacts/view/{id}/경로`.
+- 업로드: 폴더 선택 input(webkitdirectory) 추가. html 파일 + `_files` 폴더를 각각 선택하거나,
+  둘을 담은 상위 폴더 하나만 선택해도 됨(루트 .html 자동 감지). 멀티파트 전송, 경로는 `assetPaths`
+  텍스트 필드로 전달(파일명 슬래시 보존이 서블릿 구현 의존적이라 불신).
+- 저장: Postgres `artifact_assets` BYTEA (Flyway V6, 부모 삭제 시 CASCADE). 한도: 파일 5MB ·
+  아티팩트당 합계 25MB · 200개.
+- MIME 은 서버가 확장자로 결정(`MediaTypeFactory`, 클라이언트 타입 불신). 확장자 없는 자산은
+  `application/octet-stream` + `nosniff` 라 브라우저가 CSS/JS 로 해석하지 않음(저장 페이지는
+  확장자가 보존되므로 실사용 문제 없음).
+- **XSS 방어 유지**: 자산 응답에도 `Content-Security-Policy: sandbox allow-scripts` + `nosniff` —
+  직접 열리는 HTML/SVG 자산도 고유 origin. `Cache-Control: public, max-age=3600`.
+- **다른 서버에서 업로드**: Claude Code 스킬
+  [docs/claude-skills/artifact-upload/SKILL.md](docs/claude-skills/artifact-upload/SKILL.md) **파일 1개**를
+  대상 서버 `~/.claude/skills/artifact-upload/` 에 복사하면 대시보드를 모르는 세션도 "아티팩트 올려줘"로 업로드 가능.
+
+### sol dashboard 개편 2단계 — 공개 아티팩트 갤러리 (v0.0.71)
+
+아티팩트 탭 구현: HTML을 올리면 **공개 링크**(`/artifacts/view/{id}`)가 생겨 Claude 팀플랜/대시보드
+계정이 없는 사람도 링크만으로 열람 가능. Claude 아티팩트 스타일 카드 그리드(iframe 미리보기+제목+
+링크복사+삭제), 클릭 시 새 탭 상세보기.
+- 저장: Postgres TEXT (Flyway V5, 5MB/건 제한). 제목 미입력 시 HTML `<title>`→파일명 자동.
+- **XSS 방어**: 뷰어는 `Content-Security-Policy: sandbox allow-scripts` 로 서빙 — 업로드 HTML이
+  고유 origin이 되어 대시보드 API 접근/폼 제출 불가(스크립트·차트는 동작). 카드 미리보기도 sandbox iframe.
+- 인증 경계: 목록/업로드/삭제(`/api/artifacts`)는 기존 Basic Auth 뒤, 뷰어만 Go `PublicProxy`로 무인증
+  (ngrok 무료 도메인 특성상 외부인 첫 방문 시 "Visit Site" 경고 1회 표시됨).
+- Claude 공유 링크 직접 등록은 미지원(iframe 차단) — HTML 복사/다운로드 업로드 안내.
+
+### sol dashboard 개편 1단계 — 이름 + 2단 탭 (v0.0.70)
+
+- 대시보드 이름을 **sol dashboard** 로 변경(타이틀/헤더/Basic Auth realm).
+- 탭 2단화: 상위 [지라봇 | 아티팩트] — 기존 11개 탭은 지라봇 하위 탭으로(동작 무변경, 마지막 하위 탭 기억).
+  아티팩트 탭은 placeholder (2단계 v0.0.71 에서 공개 HTML 아티팩트 갤러리 제공 예정).
+
+### JDK 워치독 — 자동 업데이트 후 봇 자동 재시작 (v0.0.69)
+
+unattended-upgrades 가 openjdk 를 in-place 교체하면 실행 중인 JVM 이 서브프로세스(claude CLI)를 못
+만들어("Failed to exec spawn helper … Incorrect Java version") 모든 LLM 기능이 죽는 반쪽 장애가
+실발생(8/27, lessons L17). health 는 UP 이라 감지가 늦었다.
+- `scripts/jdk-watchdog.sh`: 실행 중 java 프로세스의 `/proc/PID/exe` 가 "(deleted)" 면(=JDK 교체 시그니처)
+  최신 jar 로 자동 재시작(기존 배포 패턴 동일: setsid + .env source + health 대기). 정상 시 no-op.
+- crontab `*/10 * * * *` 등록, 로그 `/tmp/jdk-watchdog.log`.
+- 대안 B(apt-mark hold)는 보안 패치가 밀려 기각 — A(자동 재시작)로 보안 패치 유지 + 무인 복구.
+
+### 자격증명 포함 URL에서 대시보드 fetch 실패 수정 (v0.0.68)
+
+`https://id:pw@host/dashboard/` 형태로 열면 페이지는 로드되지만 모든 데이터가 비던 문제 수정.
+원인: 문서 URL에 자격증명이 포함되면 브라우저가 상대경로 `fetch()`를
+"Request cannot be constructed from a URL that includes credentials"로 거부(보안 규칙).
+- `apiFetch(path, opts)` 래퍼: `new URL(path, location.origin)` — origin 은 자격증명을 포함하지 않아
+  안전. Basic Auth 는 페이지 로드 시 realm 에 캐시돼 이후 요청에 자동 포함.
+- app.js 의 fetch 호출 15곳 전부 래퍼로 교체, 캐시버스트 `?v=0.0.68`.
+
+### 오타 문장 skip 오분류 수정 (v0.0.67)
+
+"hybrid **serach** Index가 save load 되는 기능 추가 구현 **피료해** 이슈 만들어줘"가 `skip`("구체적인 내용을
+포함해주세요")으로 거부되던 실사고 수정. 오타 수정 재전송("필요해")은 정상 분류됐던 것으로 확인 —
+오타가 섞이면 Haiku 가 "내용 없음"으로 판정하던 문제.
+- `haiku-classifier.md` skip 정의/판정 강화: **명령어구를 제거한 뒤 내용 단어가 하나라도 남으면 skip 금지**,
+  "오타·철자 오류·한영 혼용은 내용을 모호하게 만들지 않는다" 명시. 실사고 문장 + "이슈 만들어줘"(진짜 skip)
+  few-shot 추가.
+- 라이브 검증 4/4 (실사고→story, 오타 버그 변형→bug, 진짜 skip 2종 유지) + **intent eval 101/101**
+  (오타 케이스 2개 추가, L12). 프롬프트는 호출마다 로드되므로 재배포 없이 즉시 적용.
+
+### 에픽 parent 추출을 스킬 계약으로 (v0.0.66)
+
+"…를 X 에픽 아래에 만들어줘"의 에픽명 추출을 정규식(EPIC_BEFORE/AFTER)에서 **Sonnet 스킬 계약**으로 이전:
+- `skill-bug.md`/`skill-story.md` JSON 에 **`parentEpicName`**(미언급 시 null, "에픽 발명 금지") 추가.
+- `IssueClassification`에 nullable parentEpicName 필드(4-arg 위임 생성자로 하위호환).
+- `resolveParentEpic`: 스킬이 추출한 이름 → `findEpicKeyByName`(정확→양방향 부분일치). 정규식 삭제.
+- skill eval 22케이스(에픽 추출 2 + 발명 금지 20): **parentEpic 축 1.000**, 전 임계 통과.
+- 라이브 스모크: 실사고 문장("GraphRAG … enword DBMS 에픽 아래에") → parentEpicName="enword DBMS" 확인.
+
+### NL 이슈 조작을 스킬 기반으로 일원화 — issue_action (v0.0.65)
+
+목표 아키텍처(Haiku 분류 → 분류별 Sonnet 스킬이 **원문 그대로** 수신) 완성. NL 조작 명령(담당자/SP/제목/
+마감일/우선순위 변경, 링크 생성·해제·조회, 하위작업, 스프린트 이동)이 정규식 파싱이어서 표현 변형마다
+핫픽스가 반복되던 문제(v0.0.61/64)의 구조적 해결:
+- **Haiku 신규 인텐트 `issue_action`** (decision procedure 4단계 — 이슈 키 + 조작 동사; 조회는 search).
+- **신규 `prompts/skill-issue-action.md`** (Sonnet): 원문 → 구조화 액션 JSON(action/키/슬롯/링크 방향/
+  confidence). 링크 방향표(능/피동) 를 스킬 규칙으로 이전, 판별 불가 시 `directionConfident:false`.
+- **`handleIssueAction` 디스패치**: 추출된 spec 을 **기존 실행부 그대로** 위임 — executeAssign(이름 해석
+  체인), handleUpdateCommand(SP {1,2,3,5,8} 검증·날짜·우선순위), 링크 확인 버튼, 부모 에픽/서브태스크 거부.
+  저신뢰/none → 안내 + intent_failures 기록. 검증·실행은 전부 Java (extract-then-execute).
+- **NL 정규식 제거**: IssueCommandParser 를 명령형 prefix(`하위작업 ES2-1 …` — 0초 경로)와 커맨드 record
+  들만 남기고 슬림화(~400줄 삭제). 키워드 명령(할당/검색/…)·이슈 카드·에픽 키워드는 즉시 경로 유지.
+- **eval**: intent 99케이스(신규 issue_action 9 포함) **99/99**, 신규 SkillActionEvalTest 12케이스
+  (링크 방향 능/피동, 실사고 문장 포함) **action/slot 정확도 1.000**. 이후 표현 개선은 스킬 파일 수정만으로.
+
+### 봇 멘션 이후만 파싱 + 에픽 하위 오인 + 개행 제목 수정 (v0.0.64)
+
+한 메시지("@박민석 님, … ?\n@지라 'X' 이슈를 관련 에픽 아래에 만들어줄래?")에서 겹친 실사고 3건 수정:
+1. **봇 멘션 이후 텍스트만 명령으로** — Slack 은 메시지 전체를 보내는데 기존엔 "맨 앞 멘션 1개"만
+   제거해, 봇 멘션이 문장 중간이면 앞 내용(다른 사람에게 한 말)이 분류에 섞였다.
+   `envelope.authorizations[].user_id` 로 봇 자신을 식별해 그 멘션 **이후**만 사용(없으면 기존 폴백).
+2. **"에픽 아래/밑/하위" · "under epic"은 에픽 생성 트리거에서 제외** — 에픽 "자체" 생성이 아니라
+   "에픽 하위 이슈 생성" 요청이므로 일반 생성(+`resolveParentEpic` 연결) 경로로. v0.0.53의
+   "X epic 아래에 task 생성" 실흐름도 이 수정으로 비로소 정합(기존엔 register_epic 강제로 에픽이 생성됨).
+3. **제목 개행 sanitize (2중 방어)** — Sonnet 3연속 실패 시 폴백이 멀티라인 원문을 제목으로 써
+   Jira 400("개행 문자를 포함…")이 났다. `cleanTitle` 개행 접기 + `buildRequest`/`createSubTask`
+   최종 지점 `singleLine()`.
+
+### 담당자 이름 자동 해석 확장 (v0.0.63)
+
+"담당자를 최아록으로" 지정 시 "Jira에서 최아록 사용자를 찾을 수 없습니다"가 나오던 문제 수정.
+원인: 매핑은 이미 있었지만(slack_display_name=최아록 / jira_display_name=choiahrok) 해석이
+**jira_display_name 정확 일치 + Jira user search**만 시도 — 한국어 이름은 둘 다 실패.
+- 해석 체인 확장(`resolveAssigneeByName`, sealed interface 결과형):
+  ① jira 표시명 정확 → ② **slack 표시명 정확**(한국어 이름은 대개 여기) → ③ **두 컬럼 부분일치**
+  ("아록", "Song Hyeop" — 유일할 때만 채택, 여럿이면 후보 나열 후 중단) → ④ Jira user search 폴백.
+- 응답 표기는 한국어(slackDisplayName) 우선 — 사용자가 부른 이름과 일치.
+- `할당 KEY 이름` 키워드/스레드 `담당자`/NL 어순 모두 같은 체인 사용(executeAssign 공유).
+
+### 스킬 eval 하네스 + 도메인 글로서리 + 파싱 검증 (v0.0.62)
+
+분류 스킬의 품질을 **측정 가능**하게 만들고 도메인 정확도를 올렸다:
+- **스킬 eval 하네스**: `SkillClassifierEvalTest`(opt-in, `-Dskill.eval=true`) + 골든셋 20케이스
+  (`src/test/resources/skill-eval/cases.json`, 실제 팀 도메인 어휘 사용). 검증 축 6개 — type 정확도(≥0.90),
+  SP 스케일 {1,2,3,5,8}(100%), 제목 위생: 명령어구·이슈키 없음(100%), 도메인 토큰 보존(≥0.80),
+  SP 기대범위(≥0.70), summary 구조 마커(≥0.70). 이후 스킬 수정 시 전/후 비교 필수(L12 확장).
+  주의: test 프로파일은 cli-path=/bin/true 라 eval 테스트가 실값으로 오버라이드. build.gradle 에 skill.eval 포워딩.
+- **도메인 글로서리**: 실제 이슈 1,744건에서 컴포넌트 태그([ES2M]/[EVI]/[SDK]/[Shaper]/evi-crypto/KMS…)와
+  용어(HEaaN, IVF, VCT, shard, ctxt, proto, BatchEncrypt…)를 추출해 skill-bug/skill-story 에 `<domain_context>`
+  추가 — 태그를 title 앞에 보존, 용어 번역/일반화 금지. 도메인 few-shot 각 1개 추가.
+- **파싱 검증 수정**(실 버그): JSON 으로는 유효하지만 필수 필드가 빠진 모델 응답이 그대로 통과해
+  "null" 제목 티켓이 생길 수 있었다(eval 에서 실측). type/title/SP∈{1,2,3,5,8} 검증 실패 시 재시도.
+- **eval 결과: 20/20 전 축 1.000** (type/SP/제목위생/도메인토큰/SP범위/구조마커).
+
+### 자연어 담당자 변경 (v0.0.61)
+
+"@지라 ES2-1190 담당자를 최아록으로"가 **search로 오분류**돼 "검색 결과가 없습니다"로 응답하던 문제 수정.
+담당자 변경 기능 자체는 있었으나(`할당 KEY 이름` 키워드, 스레드 `담당자 이름`) 이 자연어 어순은 어떤 결정적
+파서에도 안 걸려 Haiku로 넘어갔었다.
+- `IssueCommandParser.parseAssign`: 키 1개 + 담당자 키워드 + 이름 토큰(한/영/@멘션). 붙은 조사 분리
+  ("최아록으로"→최아록, lazy+lookahead). 조회 어휘(누구야/알려줘)는 제외 → 변경 명령으로 오인 안 함.
+- 기존 `executeAssign` 재사용(매핑→Jira user search 폴백 해석 포함). 라우팅 1.42차(키워드 `할당`의 NL 짝).
+- "ES2-123 담당자 누구야"는 카드 필러에 담당자/누구 어휘를 추가해 **이슈 카드**(담당자 필드 표시)로 응답.
+
+### 분류별 전용 스킬 분리 — skill-bug / skill-story / skill-pr-import (v0.0.60)
+
+목표 아키텍처(Haiku 의도분류 → **분류별 전용 Sonnet 스킬**) 정합화. LLM 경로 전수 감사 결과
+버그/스토리가 공용 스킬 1개를 쓰고, PR import 는 용도가 다른 스킬(Slack 신고문 분류)을 재사용하고 있었다.
+- **`prompts/skill-bug.md`**: 버그 신고 특화 — summary 를 현상→재현 경로(없으면 "재현 경로 불명", 발명 금지)→영향
+  범위→단서 구조로, 로그/에러코드/엔드포인트는 **원문 보존**. FEATURE-override few-shot 포함.
+- **`prompts/skill-story.md`**: 스토리 특화 — 목적/배경→요구사항→**완료 조건(AC) 불릿**. 사용자가 말한 범위
+  제한("로컬스토리지면 충분")을 AC 로 추출, 미언급 요구사항 발명 금지. BUG-override few-shot 포함.
+- **`prompts/skill-pr-import.md`**: PR 회고 등록 특화 — 요청문이 아닌 완료 작업 서술(무엇을/왜/어떻게),
+  PR 템플릿 잡음(체크리스트/헤더) 제거, conventional-commit prefix 제거. SP 는 기간 기반으로 대체되므로 형식만.
+- 선택: `ClaudeApiClientImpl.classifierPromptFileFor(intentHint)` — register_bug→bug 스킬, register_story→story
+  스킬, 에픽/무힌트→공용. **2단 폴백**(스킬 없음→공용→인라인) 으로 부분 배포 안전. `classifyPr` 신규.
+- 스킬 작성 기법: XML 태그 섹션, few-shot 4개(경계 케이스 포함), JSON-only 계약 (Anthropic best practices +
+  semantic parsing 문헌 조사 반영). 세 스킬 모두 라이브 스모크 검증 완료.
+- 검색(`sonnet-issue-search.md`)·웹훅 요약/카테고리는 이미 전용 스킬 — 감사 결과 목표 부합 확인.
+
+### 내 작업 미완료-한정 질의 수정 (v0.0.59)
+
+"보고자가 나인데 완료 안된 task 뭐가 있는지 알려줘"에 **완료된 task까지 모두 나오던 버그** 수정.
+원인: 의도 분류(my_tasks)까지는 정확했지만 `handleWithIntent`의 `case "my_tasks" -> handleMyWork(event)`가
+**원문을 버려서** "완료 안된"이라는 조건이 소실 → `generateMyReport`가 상태 무관 전체를 출력했다.
+- `wantsIncompleteOnly(원문)` 결정적 감지(완료 안/않/못, 미완료, 안 끝난, 끝나지 않, 남은, 미해결, not done…
+  — 긍정 질의 "완료한 작업"은 미매칭) → `generateMyReport(user, excludeDone=true)`.
+- excludeDone 모드: 완료 이슈 제외, 진행 중/해야 할 일 섹션만 + "미완료 N건 · X SP" 요약.
+  전부 완료면 축하 메시지. 키워드 `내작업`은 기존대로 완료 섹션 포함(회귀 가드 테스트).
+
+### 분류 호출 대폭 고속화 — thinking 차단 + CLI 경량화 (v0.0.58)
+
+`claude -p` 분류가 느리던 병목을 실측으로 분해해 제거. **프롬프트(skill)가 아니라 런타임이 병목**이었다:
+- **thinking 토큰 차단** (`MAX_THINKING_TOKENS=0`, DefaultProcessRunner에서 주입) — 분류 JSON은 ~60토큰이면
+  되는데 thinking이 호출당 350~450토큰을 선생성해 지연의 60~70%를 차지했다.
+  실측: **Haiku 6.5s→2.4s, Sonnet 10s→4.4s**. 프로덕션 DB 기준 분류 평균 26s/p90 45s였음.
+  **되돌리기: `.env` 에 `CLAUDE_DISABLE_THINKING=false` 한 줄 + 재시작** (`claude.disable-thinking`).
+- **CLI 경량화 플래그** (`ClaudeCliFlags.LEAN_FLAGS`, 3개 분류기 공통): `--tools ""`(도구 스키마 제거),
+  `--exclude-dynamic-system-prompt-sections`(git 상태 등 동적 섹션 + **CLAUDE.md 자동 주입 차단** — 프로젝트
+  지침이 분류 컨텍스트에 섞이던 간섭 제거), `--no-session-persistence`(세션 jsonl 누적 중단 — 기존 418개/35MB),
+  `--disable-slash-commands`. 시스템 프롬프트 **~22k→~4k 토큰**, 프롬프트 캐시 적중 안정화.
+- **타임아웃 하향**: 의도 40→15s, Sonnet 60→20s — 정상 호출이 2~4s가 되어 재시도 3회 예산이 최악 45s로 제한.
+- 정확도 검증: `IntentClassifierEvalTest`(90케이스) 전/후 비교 실시 (L12).
+
+### 이슈 링크 조회 / 해제 (v0.0.57)
+
+"ES2-123 링크 보여줘"(조회), "ES2-1 ES2-2 링크 해제"(해제)를 자연어로 처리. 링크 생성(v0.0.55)의 짝.
+- 신규 `IssueCommandParser.parseLinkList`(1키+링크+조회 동사)·`parseUnlink`(2키+링크+해제 동사).
+- 신규 클라이언트 `getIssueLinks`(GET issuelinks)·`deleteIssueLink`(DELETE, 204).
+  **조회자 상대적** 처리: outwardIssue 항목은 "this <outward> 상대", inwardIssue 항목은 "this <inward> 상대"로 렌더.
+- 해제는 대상 이슈의 링크 중 상대 키가 일치하는 linkId 를 찾아 삭제(재연결이 싸므로 확인 버튼 없이 즉시 실행).
+  두 이슈 사이 링크가 없으면 안내.
+
+### 기존 이슈 필드 수정 + 스프린트 이동 (v0.0.56)
+
+"ES2-123 SP 3으로 변경", "제목을 '..'로", "마감일 금요일로", "우선순위 높음", "ES2-123 스프린트로 옮겨줘"를
+자연어로 처리(기존 미지원 — 생성 시에만 설정 가능했음). 결정적 파싱(키 정확히 1개 + 필드 키워드):
+- 신규 `IssueCommandParser.parseUpdate`: SP/제목/마감일/우선순위. 키의 숫자(-123)를 값으로 오인하지 않도록 키 제거 후 파싱.
+  **SP는 팀 스케일 {1,2,3,5,8} 검증**(docs/story-point-guide.md), 벗어나면 거부. 제목은 따옴표 필수. 마감일은 절대/상대(오늘·내일·요일).
+- 신규 클라이언트 `updateIssueFields(key, fields)`(PUT /rest/api/3/issue/{key}, 204)·`getPriorities`(@Cacheable).
+  우선순위는 사용자 표현(높음/긴급/보통/낮음)→정규 버킷→사이트 실제 name(getPriorities 매칭, 로컬라이즈 대비, L4)으로 해석.
+- 마감일 상대어(오늘/내일/모레/글피/다음주/요일)는 KST 기준으로 ISO 날짜 해석(요일은 다음 도래일).
+- 제목/SP 성공 시 로컬 IssueEntity 도 동기화(대시보드/카드 일관성). 스프린트 이동은 기존 `moveToActiveSprint` 재사용.
+- 실측: 라이브 우선순위 목록(Highest/High/Medium/Low/Lowest) 확인.
+
+### 이슈 링크 생성 — blocks/relates/duplicate (v0.0.55)
+
+"ES2-1352가 ES2-1532에 block 되고 있으니 연결해줘" 같은 자연어로 이슈 링크를 생성한다(기존 미지원).
+결정적 파싱(프롬프트 무변경):
+- 신규 `IssueCommandParser.parseLink`: 이슈 키 정확히 2개 + 관계 동사(block/막/블락/의존/중복/duplicate/relate/연결)일 때만 발동.
+  한/영 어순과 능동·피동을 구분해 Jira 방향(`inwardIssue <inward> outwardIssue`)을 결정 — "A가 B에 막힘"=A is blocked by B(inward=A),
+  "A가 B를 막음"=A blocks B(inward=B), "A duplicates B"(outward=A) 등. 방향 판별 불가 시 `ambiguous`.
+- 신규 클라이언트 `getIssueLinkTypes`(@Cacheable, 사이트 정의 Blocks/Relates/Duplicate…)·`linkIssues(inward, outward, typeName)`(POST /rest/api/3/issueLink).
+  관계→실제 타입은 name/inward/outward 부분일치로 해석(로컬라이즈 대비), POST엔 API가 준 정확한 name 사용.
+- 방향 모호 시 확인 버튼 카드(`ACTION_LINK_CONFIRM`, value `inward|outward|type`)로 사용자가 방향 선택 → SlackInteractionController가 확정.
+- `관련/연관` 단독은 오탐 방지 위해 링크로 보지 않음(명시적 연결/링크/relate 필요). 링크 해제는 안내만(Phase 4 예정).
+- 실측: 라이브 issueLinkType 조회로 Blocks(outward="blocks")/Duplicate/Relates 방향 확인.
+
+### 특정 이슈 아래 하위작업 생성 — 키/이름 지정 (v0.0.54)
+
+기존엔 하위작업이 **스레드 안에서만** 가능했다(스레드 root 이슈가 부모). 스레드 밖에서
+"ES2-123에 하위작업으로 X 추가"라고 하면 Haiku가 register_story로 오분류해 **최상위 스토리**가
+생성되던 문제 수정. 결정적(deterministic) 파싱을 라우팅에 추가(프롬프트 무변경 → eval 부담 없음):
+- 신규 `util/IssueCommandParser.parseSubtask`: `하위작업 ES2-123 <내용>`(명령형), `ES2-123에 하위작업으로 '..' 추가`(NL 키형),
+  `<이름> 스토리 아래에 하위작업 ..`(NL 이름형)을 파싱. 내용은 따옴표 우선, 나머지는 Sonnet이 제목화.
+- 이름형은 신규 `JiraApiClient.findIssueKeyByName`(findEpicKeyByName의 매칭 로직 공용화, JQL `issuetype != Epic`)로 키 해석.
+- 부모 검증: 없음→안내 / 부모가 서브태스크→거부(서브태스크 아래 서브태스크 불가) / 부모가 에픽→거부(에픽 직속 하위작업 불가, 스토리 연결 안내).
+- 라우팅은 에픽 키워드 스테이지보다 **먼저** 실행돼 "에픽 아래 하위작업"을 에픽 생성으로 오인하지 않음. 스레드 안 키 없는 `하위작업 <내용>`은 기존 스레드 경로 유지.
+
+### 에픽 하위 티켓 생성 (v0.0.53)
+
+"'X' 라는 이름으로 `<에픽명>` epic 아래에 task로 생성해줘" 처럼 상위 에픽을 지정한 자연어 생성이
+에픽에 연결되지 않던 문제 수정. 원인: `createIssue`/`buildRequest` 에 parent 필드 자체가 없었고
+에픽명→키 조회 경로도 없었음. 조치:
+- `createIssue(..., parentKey)` 오버로드 + `buildRequest` 에 `fields.parent.key` 세팅(에픽 타입 자신엔 미적용).
+  (이 사이트는 company-managed classic 이지만 task→epic 연결에 `parent.key` 를 씀 — 실측 확인.)
+- `findEpicKeyByName`: JQL `issuetype = Epic`(L7: 영문 정식명) 로 에픽 목록 조회 후 **정확 일치 우선,
+  없으면 양방향 부분 일치**(요약이 추출 문구를 포함/피포함) 로 매칭. 못 찾으면 parent 없이 일반 생성(비치명적).
+- `resolveParentEpic`: EPIC_BEFORE(`X epic 아래`) / EPIC_AFTER(`under epic X`) 두 정규식으로 에픽명 추출.
+- 실측: "enword DBMS" → **ES2-2141** 매칭 확인. 테스트 2건 추가(연결/미발견 폴백), 전체 370건 통과.
+
+### 분류 재시도 횟수 상향 (v0.0.50)
+
+응답 즉시성보다 정확 분류를 우선(사용자 결정). 두 분류기(Haiku 의도 / Sonnet 상세) 모두 **최대 3회 재시도**
+(`MAX_ATTEMPTS=3`)로 통일하고, **타임아웃도 재시도 대상**에 포함(이전엔 Sonnet 은 타임아웃 재시도 안 함).
+Haiku 타임아웃 후 재시도는 짧은 타임아웃(15s) 유지로 최악 누적 지연 제한. 분류는 비동기라 Slack 3초 ack 와 무관.
+
+### 버그 원인 자동분류 + 해결 지식 통합 (v0.0.51)
+
+버그가 완료로 전환되면 Notion '버그 현황' DB **한 곳**에 다음을 자동 적재한다:
+- **원인분류**(대분류 select) + **세부원인**(소분류 multi_select, 다중) — `prompts/bug-category.md` 체계(10/30)로
+  Haiku 분류(`classifyBugCategory`). 소분류 추가는 `prompts/bug-category.md` + `BugCategory.java` 라벨맵만 고치면 됨.
+- **근본원인 / 해결방법** — 기존 Claude 요약(`summarizeBugResolution`) 재활용
+- **PR링크** — GitHub 이슈키 검색(`searchPullRequestUrls`)으로 해결 PR 링크(클릭 가능)
+- 별도 '버그 해결 기록'(resolution) DB 적재 경로는 **제거** → 그 DB 안전하게 삭제 가능 (`.env` `NOTION_DATABASE_ID`도 불필요)
+- 모든 enrich 단계는 실패해도 비치명적(해당 속성만 비고 진행). 분류는 비동기라 Slack ack 무관.
+
+### 의도 분류기 타임아웃 재시도 + 상향 (v0.0.49)
+
+v0.0.48 후에도 "보고자가 나인데 완료 안된 task?" 가 "이해하지 못했어요"로 응답. 원인은 exit≠0 이 아니라
+**Haiku 호출 타임아웃**(25s) — Haiku 지연은 변동이 커 6~24s+ outlier 가 실측됨. v0.0.48 은 타임아웃을 재시도
+안 했기에 즉시 unknown. 조치: (1) 의도분류 타임아웃 25→**40s**, (2) 타임아웃도 **1회 재시도하되 둘째는
+짧은 타임아웃(15s)**으로 최악 지연 제한(타임아웃 outlier 는 보통 일시적이라 재시도가 빠르게 성공).
+
+### 의도 분류기에도 재시도 적용 (v0.0.48)
+
+"내가 아직 안한 일이 뭐가 있지?" 같은 정상 입력이 가끔 "이해하지 못했어요"로 응답되던 문제. 원인은 분류 능력이
+아니라(직접 분류 시 my_tasks 0.96) **Haiku 의도분류 CLI 의 간헐적 실패 → unknown 으로 즉시 떨어짐**.
+v0.0.47 을 의도분류기(`IntentClassifierImpl`)에도 적용: 비-타임아웃 실패는 **1회 재시도**, 타임아웃은 즉시 unknown.
+의도분류기 단위 테스트도 신규 추가(이전엔 eval 만 있었음).
+
+### 분류 호출 재시도 + 의도기반 fallback (v0.0.47)
+
+Sonnet 분류 CLI 가 간헐적으로 exit≠0/빈출력/파싱실패로 떨어지던 문제(원문이 제목 되는 fallback 유발)에 대응.
+**타임아웃이 아닌 일시적 실패는 1회 재시도**(타임아웃은 지연 2배 방지 위해 재시도 안 함). 두 번 다 실패하면
+**Haiku 의도로 type 추정**(register_bug→BUG, register_story→FEATURE)해 OTHER 로 뭉뚱그리지 않는다.
+(기존 ES2-2077 은 제목/타입 수동 교정함.)
+
+### 이슈 제목에서 명령어구 제거 (v0.0.46)
+
+"…티켓 만들어줘"처럼 보낸 요청이 **제목에 그대로** 들어가던 문제. 원인은 프롬프트가 아니라(정상 동작),
+**Sonnet 분류 호출 실패(예: CLI exit 1) 시 `IssueClassification.fallback()`이 원문을 제목으로 쓰던 것**.
+fallback 제목을 정제(앞쪽 이슈키 `[ES2-123]`, 뒤쪽 요청/명령 어구 "만들어줘/등록해줘/추가해줘 …" 제거)하고,
+프롬프트(skill + 인라인)에도 "제목에 명령어구·이슈키 금지" 규칙을 명시했다. 성능 영향 없음(실패 경로 한정).
+※ Sonnet 호출이 간헐적으로 exit 1 로 실패하는 별개 이슈가 있으며, 이제 실패해도 제목이 깨끗하게 degrade 된다.
+
 ### PR 상태별 워크플로 전환 (v0.0.45)
 
 PR-import 가 열린 PR 도 받는다. PR 상태에 따라 전환 목표를 달리한다: **merged → 완료**, **open(ready) → 검토 중**,

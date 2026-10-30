@@ -3,18 +3,24 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>지라봇 대시보드</title>
-  <link rel="stylesheet" href="style.css?v=0.0.42">
+  <title>sol dashboard</title>
+  <link rel="stylesheet" href="style.css?v=0.0.89">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
 <header>
-  <h1>🤖 지라봇 대시보드</h1>
+  <h1>🌞 sol dashboard</h1>
   <div class="header-right">
+    <span id="me-name" class="muted"></span>
     <span id="last-sync" class="muted">마지막 동기화: -</span>
     <button id="btn-sync" class="btn primary">지금 동기화</button>
   </div>
 </header>
+
+<nav id="top-tabs">
+  <button class="top-tab active" data-top="jirabot">지라봇</button>
+  <button class="top-tab" data-top="artifacts">아티팩트</button>
+</nav>
 
 <nav id="tabs">
   <button class="tab active" data-tab="overview">개요</button>
@@ -24,9 +30,11 @@
   <button class="tab" data-tab="bugs">버그</button>
   <button class="tab" data-tab="prs">PR 현황</button>
   <button class="tab" data-tab="issues">이슈 목록</button>
-  <button class="tab" data-tab="users">사용자 관리</button>
+  <button class="tab" data-tab="users" id="tab-users" hidden>사용자 관리</button>
+  <button class="tab" data-tab="knowledge">버그 지식</button>
   <button class="tab" data-tab="bot">봇 상태</button>
   <button class="tab" data-tab="features">기능요청</button>
+  <button class="tab" data-tab="members" id="tab-members" hidden>회원 관리</button>
 </nav>
 
 <main>
@@ -142,6 +150,28 @@
     </div>
     <div id="user-msg" class="msg"></div>
     <table id="table-users"><thead><tr><th>Slack</th><th>Jira 이름</th><th>accountId</th><th>리마인더</th><th>할당알림</th><th></th></tr></thead><tbody></tbody></table>
+
+    <h3>GitHub ↔ Jira 매핑 <span class="muted">(PR import 시 보고자/담당자 해석 1순위)</span></h3>
+    <div class="form-row">
+      <input id="gh-login" type="text" placeholder="GitHub 로그인 (예: Kim-YeongHyeon)">
+      <input id="gh-jira" type="text" placeholder="Jira 표시 이름 (예: YeongHyeonKim)">
+      <button id="btn-gh-add" class="btn primary">등록 / 갱신</button>
+    </div>
+    <div id="gh-msg" class="msg"></div>
+    <table id="table-gh"><thead><tr><th>GitHub</th><th>Jira 이름</th><th>accountId</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <!-- 버그 지식베이스 -->
+  <section id="panel-knowledge" class="panel">
+    <h2>버그 지식베이스 <span class="muted">(Notion '버그 현황' 동기화 · 5분 캐시)</span>
+      <a class="btn" href="/api/dashboard/export/bug-knowledge.csv" download>CSV 내보내기</a></h2>
+    <div class="filters">
+      <input id="kb-q" type="text" placeholder="검색 (제목·근본원인·해결방법·키)" style="flex:1;min-width:240px">
+      <select id="kb-category"><option value="">원인분류 전체</option></select>
+      <select id="kb-status"><option value="">상태 전체</option><option>미해결</option><option>해결</option></select>
+    </div>
+    <div class="cards" id="kb-cards"></div>
+    <table id="table-knowledge"><thead><tr><th>키</th><th>제목</th><th>원인분류</th><th>세부원인</th><th>근본원인</th><th>해결방법</th><th>PR</th><th>해결일</th></tr></thead><tbody></tbody></table>
   </section>
 
   <!-- 봇 상태 -->
@@ -156,6 +186,20 @@
   </section>
 
   <!-- 기능요청 -->
+  <!-- 회원 관리 (관리자 전용, v0.0.79) -->
+  <section id="panel-members" class="panel">
+    <h2>회원 관리 <span class="muted">(관리자 전용 — 만든 아이디/비밀번호로 대시보드 로그인)</span></h2>
+    <div class="form-row">
+      <input id="m-name" type="text" placeholder="이름 (예: 홍길동)" maxlength="100">
+      <input id="m-username" type="text" placeholder="아이디 (영문 소문자·숫자 3~30자)" maxlength="30" autocomplete="off">
+      <input id="m-password" type="password" placeholder="비밀번호 (4자 이상)" autocomplete="new-password">
+      <button id="btn-member-add" class="btn primary">사용자 만들기</button>
+    </div>
+    <div class="msg warn">⚠️ 평소 사용하지 않는 간단한 비밀번호를 사용해주세요. (비밀번호는 암호화되어 저장되지만 사내 도구라 기본적인 보호만 제공합니다)</div>
+    <div id="member-msg" class="msg"></div>
+    <table id="table-members"><thead><tr><th>이름</th><th>아이디</th><th>상태</th><th>생성일</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
+
   <section id="panel-features" class="panel">
     <h2>기능요청 게시판 <span class="muted">(등록하면 관리자에게 Slack DM이 갑니다)</span></h2>
     <div class="filters">
@@ -169,9 +213,36 @@
     <div id="fr-msg" class="msg"></div>
     <table id="table-features"><thead><tr><th>상태</th><th>제목</th><th>내용</th><th>작성자</th><th>작성일</th><th>완료일</th><th></th></tr></thead><tbody></tbody></table>
   </section>
+  <!-- 아티팩트 (상위 탭) -->
+  <section id="panel-artifacts" class="panel">
+   <div class="art-layout">
+    <!-- 주제 폴더 목록 (v0.0.86) — 카드를 여기로 끌어다 놓으면 이동 -->
+    <aside id="art-folders" class="art-folders"></aside>
+    <div class="art-main">
+    <div class="art-upload">
+      <h2>아티팩트 올리기</h2>
+      <p class="muted">HTML을 올리면 공유 링크가 생깁니다 — 열람에도 로그인이 필요해요.
+        Claude 아티팩트는 우측 상단 메뉴에서 HTML로 복사/다운로드해 올리세요. 카드의 ✏️로 같은 링크를 유지한 채 내용을 교체할 수 있어요.</p>
+      <div class="art-form">
+        <input id="art-title" type="text" placeholder="제목 (비우면 HTML <title>에서 자동)" maxlength="200">
+        <input id="art-file" type="file" accept=".html,.htm,text/html">
+        <label class="muted" for="art-dir">폴더(선택 — 저장 페이지의 _files):</label>
+        <input id="art-dir" type="file" webkitdirectory multiple>
+        <button id="art-paste-toggle" class="btn">HTML 붙여넣기</button>
+        <button id="btn-art-upload" class="btn primary">올리기</button>
+        <button id="art-edit-cancel" class="btn" style="display:none">수정 취소</button>
+        <span id="art-target" class="muted"></span>
+      </div>
+      <textarea id="art-paste" placeholder="여기에 HTML 전체를 붙여넣으세요" style="display:none; width:100%; height:140px; margin-top:8px;"></textarea>
+      <p id="art-msg" class="muted"></p>
+    </div>
+    <div id="art-grid" class="art-grid"></div>
+    </div>
+   </div>
+  </section>
 </main>
 
 <footer class="muted">사내망 전용 · 데이터는 로컬 DB 기준 (Jira 와의 차이는 [지금 동기화] 후 새로고침)</footer>
-<script src="app.js?v=0.0.42"></script>
+<script src="app.js?v=0.0.89"></script>
 </body>
 </html>

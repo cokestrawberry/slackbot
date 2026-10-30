@@ -1,9 +1,30 @@
 server:
   port: 8080
+  tomcat:
+    # STUDY: Tomcat 은 sendRedirect 의 상대 경로를 "요청 받은 scheme" 기준 절대 URL 로 바꾼다.
+    #        Go 프록시가 http 로 넘겨주므로 https 터널 사용자에게 http:// 주소로 redirect 되던 문제(v0.0.84)
+    #        → Location 을 상대 경로(/dashboard/) 그대로 내보내 브라우저가 현재 https 기준으로 해석하게 한다.
+    use-relative-redirects: true
+
+# 대시보드 로그인 계정 (v0.0.73 — 전 경로 로그인 필수). Go 터널 프록시와 같은 값을 쓴다.
+dashboard:
+  user: ${DASHBOARD_USER:}
+  password: ${DASHBOARD_PASSWORD:}
+  # 관리자 계정의 헤더 표시 이름 (v0.0.80, 기본 "관리자")
+  admin-name: ${DASHBOARD_ADMIN_NAME:관리자}
+  # 브라우저 로그인 창의 영역(realm) 이름 (v0.0.85). 바꾸면 모든 브라우저에 기억된 로그인이 무효화되어
+  # 전원 재로그인 — 계정 정책 변경(예: 공용 sol 계정 폐지) 후 오래된 캐시를 정리할 때 사용.
+  auth-realm: ${DASHBOARD_AUTH_REALM:sol dashboard 2}
 
 spring:
   application:
     name: slackbot-server
+  servlet:
+    multipart:
+      # 아티팩트 자산 업로드 (v0.0.72). 앱 검증(파일 5MB·합계 25MB)이 먼저 친절한 400 을
+      # 주도록 컨테이너 한도는 여유 있게 — 여기 걸리면 413/커넥션 중단으로 떨어진다.
+      max-file-size: 10MB
+      max-request-size: 40MB
   # STUDY: Spring Boot는 application.yml/properties에서 ${VAR:default} 로 env var 주입 가능.
   datasource:
     # STUDY: 호스트를 변수화 — bare-metal 은 기본 localhost, docker-compose 에서는 POSTGRES_HOST=postgres 주입.
@@ -49,13 +70,19 @@ claude:
   model: claude-sonnet-4-6
   # STUDY: 단순 변환 작업(브랜치 슬러그)용 경량 모델 — 지연 수 초 단축, 품질 동등.
   fast-model: ${CLAUDE_FAST_MODEL:claude-haiku-4-5}
-  timeout-seconds: 60
+  # STUDY: thinking 차단(v0.0.58) 후 정상 호출이 Sonnet 4~5s/Haiku 2~4s 라 20s 면 outlier 까지 커버.
+  #        (검색/버그요약처럼 입력이 큰 호출도 출력이 작아 동일 적용)
+  timeout-seconds: 20
   permission-mode: plan
   max-turns: 1
-  # STUDY: Haiku 의도 분류기 설정. --bare로 불필요한 컨텍스트 스킵, --system-prompt-file로 skill 전달.
+  # STUDY: 분류 호출의 thinking 토큰 차단(실측: 지연의 60~70%가 thinking — Haiku 6.5s→2.4s, Sonnet 10s→4.4s).
+  #        품질이 떨어지면 .env 에 CLAUDE_DISABLE_THINKING=false 한 줄로 즉시 복원(재시작 필요).
+  disable-thinking: ${CLAUDE_DISABLE_THINKING:true}
+  # STUDY: Haiku 의도 분류기 설정. --system-prompt-file로 skill 전달. (--bare는 구독 인증을 깨므로 미사용)
+  #        thinking 차단 후 정상 2~4s — 15s 면 재시도 3회 예산이 최악 45s 로 제한된다.
   intent:
     model: claude-haiku-4-5
-    timeout-seconds: 25
+    timeout-seconds: 15
     prompt-file: prompts/haiku-classifier.md
 
 # Jira 설정 — spring-service-engineer의 JiraApiClient
@@ -120,6 +147,15 @@ reminder:
   biweekly-anchor: ${REMINDER_BIWEEKLY_ANCHOR:2026-06-22}
   # 일일 리마인더에서 "진행 중" 으로 이 일수 이상 정체된 이슈를 ⚠️ 로 태그(진입 시각 기준).
   stale-days: ${REMINDER_STALE_DAYS:7}
+
+# 평일 아침 "오늘의 부탁" 채널 메시지 (v0.0.78). 문구: classpath messages/daily-prompt.txt
+# (DAILY_PROMPT_MESSAGE_FILE 로 외부 파일 지정 시 재빌드 없이 교체 가능). enabled=false 로 비상 차단.
+daily-prompt:
+  enabled: ${DAILY_PROMPT_ENABLED:true}
+  channel: ${DAILY_PROMPT_CHANNEL:C06702A7BPD}
+  cron: ${DAILY_PROMPT_CRON:0 30 9 * * MON-FRI}
+  zone: ${DAILY_PROMPT_ZONE:Asia/Seoul}
+  message-file: ${DAILY_PROMPT_MESSAGE_FILE:}
 
 # STUDY: Actuator. /actuator/health = 헬스체크. Phase 1에서는 별도 /health 컨트롤러도 제공.
 management:

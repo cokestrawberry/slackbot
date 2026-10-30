@@ -68,6 +68,184 @@ class JiraApiClientImplTest {
         assertThat(body).doesNotContain("sp-");
     }
 
+    // STUDY: /rest/api/3/search/jql 응답 한 페이지(nextPageToken 없음)를 만든다.
+    private static String searchResponse(String... summaries) {
+        StringBuilder sb = new StringBuilder("{\"issues\":[");
+        for (int i = 0; i < summaries.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append("{\"key\":\"PROJ-").append(100 + i)
+              .append("\",\"fields\":{\"summary\":\"").append(summaries[i])
+              .append("\",\"issuetype\":{\"name\":\"Story\",\"subtask\":false}}}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    @Test
+    void findIssueKeyByName_exactMatchWins() {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody(searchResponse("결제 모듈 개선", "결제 모듈", "결제")));
+
+        // 인덱스 1이 정확 일치 → PROJ-101
+        assertThat(client.findIssueKeyByName("결제 모듈")).contains("PROJ-101");
+    }
+
+    @Test
+    void findIssueKeyByName_partialMatchWhenNoExact() {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody(searchResponse("로그인 리팩토링", "결제 모듈 리스트")));
+
+        // 정확 일치 없음 → 부분 일치(요약이 needle 포함) 첫 후보 PROJ-101
+        assertThat(client.findIssueKeyByName("결제 모듈")).contains("PROJ-101");
+    }
+
+    @Test
+    void findIssueKeyByName_noMatch_returnsEmpty() {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody(searchResponse("전혀 다른 이슈", "또 다른 것")));
+
+        assertThat(client.findIssueKeyByName("결제 모듈")).isEmpty();
+    }
+
+    @Test
+    void findIssueKeyByName_excludesEpicViaJql() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody(searchResponse("결제 모듈")));
+
+        client.findIssueKeyByName("결제 모듈");
+
+        String path = server.takeRequest().getPath();
+        // JQL 에 issuetype != Epic 이 포함되어야 함(에픽은 하위작업 부모가 될 수 없음)
+        assertThat(java.net.URLDecoder.decode(path, java.nio.charset.StandardCharsets.UTF_8))
+                .contains("issuetype != Epic");
+    }
+
+    // ==================== 이슈 링크 ====================
+
+    @Test
+    void getIssueLinkTypes_parsesNameInwardOutward() {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody("{\"issueLinkTypes\":["
+                        + "{\"id\":\"10000\",\"name\":\"Blocks\",\"inward\":\"is blocked by\",\"outward\":\"blocks\"},"
+                        + "{\"id\":\"10003\",\"name\":\"Relates\",\"inward\":\"relates to\",\"outward\":\"relates to\"}]}"));
+
+        var types = client.getIssueLinkTypes();
+        assertThat(types).hasSize(2);
+        assertThat(types.get(0).name()).isEqualTo("Blocks");
+        assertThat(types.get(0).outward()).isEqualTo("blocks");
+        assertThat(types.get(0).inward()).isEqualTo("is blocked by");
+    }
+
+    @Test
+    void linkIssues_putsKeysInCorrectDirectionSlots() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(201));
+
+        boolean ok = client.linkIssues("ES2-1352", "ES2-1532", "Blocks");
+
+        assertThat(ok).isTrue();
+        String body = server.takeRequest().getBody().readUtf8();
+        // 방향 버그 트립와이어: inwardIssue=1352(막힌 쪽), outwardIssue=1532(막는 쪽)
+        assertThat(body).contains("\"inwardIssue\":{\"key\":\"ES2-1352\"}");
+        assertThat(body).contains("\"outwardIssue\":{\"key\":\"ES2-1532\"}");
+        assertThat(body).contains("\"type\":{\"name\":\"Blocks\"}");
+    }
+
+    @Test
+    void linkIssues_400_returnsFalse() {
+        server.enqueue(new MockResponse().setResponseCode(400).setBody("bad link"));
+
+        assertThat(client.linkIssues("ES2-1", "ES2-2", "Blocks")).isFalse();
+    }
+
+    // ==================== 필드 수정 / 우선순위 ====================
+
+    @Test
+    void getPriorities_parsesList() {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody("[{\"id\":\"1\",\"name\":\"Highest\"},{\"id\":\"3\",\"name\":\"Medium\"}]"));
+
+        var ps = client.getPriorities();
+        assertThat(ps).hasSize(2);
+        assertThat(ps.get(0).name()).isEqualTo("Highest");
+    }
+
+    @Test
+    void updateIssueFields_wrapsInFieldsObject() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+
+        boolean ok = client.updateIssueFields("PROJ-1", java.util.Map.of("summary", "새 제목"));
+
+        assertThat(ok).isTrue();
+        var req = server.takeRequest();
+        assertThat(req.getMethod()).isEqualTo("PUT");
+        assertThat(req.getPath()).contains("/rest/api/3/issue/PROJ-1");
+        assertThat(req.getBody().readUtf8()).contains("\"fields\":{\"summary\":\"새 제목\"}");
+    }
+
+    @Test
+    void updateIssueFields_400_returnsFalse() {
+        server.enqueue(new MockResponse().setResponseCode(400).setBody("bad"));
+        assertThat(client.updateIssueFields("PROJ-1", java.util.Map.of("duedate", "2026-07-10"))).isFalse();
+    }
+
+    // ==================== 링크 조회 / 해제 ====================
+
+    @Test
+    void getIssueLinks_rendersViewerRelativeDirection() {
+        // outwardIssue 항목 → "this <outward> other" (여기선 this blocks ES2-2)
+        // inwardIssue 항목 → "this <inward> other" (여기선 this is blocked by ES2-3)
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody("{\"fields\":{\"issuelinks\":["
+                        + "{\"id\":\"5001\",\"type\":{\"inward\":\"is blocked by\",\"outward\":\"blocks\"},"
+                        + "\"outwardIssue\":{\"key\":\"ES2-2\",\"fields\":{\"summary\":\"결제\"}}},"
+                        + "{\"id\":\"5002\",\"type\":{\"inward\":\"is blocked by\",\"outward\":\"blocks\"},"
+                        + "\"inwardIssue\":{\"key\":\"ES2-3\",\"fields\":{\"summary\":\"인증\"}}}]}}"));
+
+        var links = client.getIssueLinks("ES2-1");
+        assertThat(links).hasSize(2);
+        assertThat(links.get(0).description()).isEqualTo("blocks");
+        assertThat(links.get(0).otherKey()).isEqualTo("ES2-2");
+        assertThat(links.get(1).description()).isEqualTo("is blocked by");
+        assertThat(links.get(1).otherKey()).isEqualTo("ES2-3");
+    }
+
+    @Test
+    void deleteIssueLink_success() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+
+        assertThat(client.deleteIssueLink("5001")).isTrue();
+        var req = server.takeRequest();
+        assertThat(req.getMethod()).isEqualTo("DELETE");
+        assertThat(req.getPath()).contains("/rest/api/3/issueLink/5001");
+    }
+
+    @Test
+    void deleteIssueLink_404_returnsFalse() {
+        server.enqueue(new MockResponse().setResponseCode(404).setBody("gone"));
+        assertThat(client.deleteIssueLink("9999")).isFalse();
+    }
+
+    @Test
+    void createIssue_multilineTitle_isCollapsedToSingleLineSummary() throws Exception {
+        // 마지막 방어선: 어떤 경로로 개행 제목이 와도 Jira summary 는 한 줄 (400 "개행 문자" 방지, v0.0.64)
+        server.enqueue(new MockResponse().setResponseCode(201)
+                .setHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .setBody("{\"id\":\"1\",\"key\":\"PROJ-2\",\"self\":\"s\"}"));
+
+        client.createIssue(new IssueClassification(
+                IssueClassification.IssueType.BUG, 2, "첫 줄\n둘째 줄", "요약"), "U1", null);
+
+        String body = server.takeRequest().getBody().readUtf8();
+        assertThat(body).contains("\"summary\":\"첫 줄 둘째 줄\"");
+    }
+
     @Test
     void createIssue_400_throwsNonTransient() {
         server.enqueue(new MockResponse().setResponseCode(400).setBody("bad"));

@@ -37,6 +37,10 @@ import org.springframework.test.web.servlet.MockMvc;
         "jira.email=test@example.com",
         "jira.api-token=test-token",
         "jira.project-key=TEST",
+        // v0.0.73: 대시보드 전면 로그인 — validator 필수 키 + httpBasic 계정
+        "dashboard.user=sol",
+        "dashboard.password=test-pw",
+        "dashboard.admin-name=김영현",
         "spring.autoconfigure.exclude=" +
                 "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration," +
                 "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration"
@@ -67,6 +71,26 @@ class SecurityConfigIntegrationTest {
     @MockitoBean
     private GitHubUserMappingRepository gitHubUserMappingRepository;
 
+    // L11: 새 JPA repo 는 여기 명시적으로 mock 해야 컨텍스트가 뜬다 (v0.0.71 artifacts).
+    @MockitoBean
+    private com.jirabot.slack.repository.ArtifactRepository artifactRepository;
+
+    // L11 (v0.0.72 artifact assets)
+    @MockitoBean
+    private com.jirabot.slack.repository.ArtifactAssetRepository artifactAssetRepository;
+
+    // L11 (v0.0.75 artifact comments)
+    @MockitoBean
+    private com.jirabot.slack.repository.ArtifactCommentRepository artifactCommentRepository;
+
+    // L11 (v0.0.79 dashboard users)
+    @MockitoBean
+    private com.jirabot.slack.repository.DashboardUserRepository dashboardUserRepository;
+
+    // L11 (v0.0.86 artifact folders)
+    @MockitoBean
+    private com.jirabot.slack.repository.ArtifactFolderRepository artifactFolderRepository;
+
     @MockitoBean
     private JiraSyncService jiraSyncService;
 
@@ -74,6 +98,199 @@ class SecurityConfigIntegrationTest {
     void healthEndpointIsPublic() throws Exception {
         mockMvc.perform(get("/health"))
                 .andExpect(status().isOk());
+    }
+
+    // v0.0.73: 대시보드 전면 로그인 필수 — 터널이 아닌 :8080 직접 접근도 401 이어야 한다.
+    @Test
+    void dashboardPathsRequireLogin() throws Exception {
+        mockMvc.perform(get("/dashboard/")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/dashboard/summary")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/artifacts")).andExpect(status().isUnauthorized());
+        // 뷰어도 로그인 대상 (v0.0.73 — 무인증 링크 공유 중단)
+        mockMvc.perform(get("/artifacts/view/1/")).andExpect(status().isUnauthorized());
+        // v0.0.75: 인라인 댓글 리뷰 페이지·댓글 API 도 로그인 필수.
+        // 리뷰 진입점은 302 리다이렉트지만, 무인증이면 리다이렉트 전에 401 이어야 한다.
+        mockMvc.perform(get("/artifacts/review/1")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/artifacts/1/comments")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void dashboardPathsAcceptBasicAuth() throws Exception {
+        org.mockito.Mockito.when(artifactRepository.findAllSummaries())
+                .thenReturn(java.util.List.of());
+
+        mockMvc.perform(get("/api/artifacts").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void loginChallenge_usesConfiguredRealm() throws Exception {
+        // v0.0.85: realm 이름이 바뀌어야 브라우저에 기억된 옛 계정(sol/sol)이 무효화된다.
+        // 테스트 프로퍼티에 realm 을 따로 안 주므로 application.yml 기본값이 실제로 쓰이는지 확인.
+        mockMvc.perform(get("/dashboard/"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .header().string("WWW-Authenticate", "Basic realm=\"sol dashboard 2\""));
+    }
+
+    @Test
+    void dashboardWithoutTrailingSlash_redirects() throws Exception {
+        // v0.0.84 회귀 방지: /dashboard 를 forward 하면 주소창이 그대로 남아 상대경로 style.css·app.js 가
+        // /style.css·/app.js 로 풀려 404 → 화면이 깨진다. 반드시 /dashboard/ 로 redirect 해야 한다.
+        mockMvc.perform(get("/dashboard").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().is3xxRedirection())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .redirectedUrl("/dashboard/"));
+        mockMvc.perform(get("/dashboard/").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .forwardedUrl("/dashboard/index.html"));
+    }
+
+    @Test
+    void reviewStaticPage_servedWithAuth() throws Exception {
+        // {id:\d+} 회귀 방지 — 컨트롤러 매핑이 index.html 을 삼키면 400 이 나며 리뷰 SPA 가 깨진다.
+        mockMvc.perform(get("/artifacts/review/index.html?id=1")
+                        .header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void artifactViewer_framableBySameOrigin() throws Exception {
+        // v0.0.75 라이브 검증에서 발견: XFO 라이터는 컨트롤러가 넣은 헤더를 무조건 덮어쓴다.
+        // 전역 sameOrigin 설정이 빠지면 리뷰 iframe·카드 미리보기가 전부 차단되므로 회귀 고정.
+        mockMvc.perform(get("/artifacts/view/1/").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .header().string("X-Frame-Options", "SAMEORIGIN"));
+    }
+
+    // ===== v0.0.79: DB 사용자 계정 + 관리자 전용 회원 관리 =====
+
+    private void givenDbUser(String username, String rawPassword, boolean enabled) {
+        com.jirabot.slack.entity.DashboardUserEntity u = new com.jirabot.slack.entity.DashboardUserEntity(
+                username, "테스트", passwordEncoder.encode(rawPassword));
+        u.setEnabled(enabled);
+        org.mockito.Mockito.when(dashboardUserRepository.findByUsername(username))
+                .thenReturn(java.util.Optional.of(u));
+    }
+
+    @Autowired
+    private org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
+
+    @Test
+    void dbUser_canUseDashboard_butNotAdminApi() throws Exception {
+        givenDbUser("kim", "pw1234", true);
+        org.mockito.Mockito.when(artifactRepository.findAllSummaries()).thenReturn(java.util.List.of());
+
+        mockMvc.perform(get("/api/artifacts").header("Authorization", basic("kim", "pw1234")))
+                .andExpect(status().isOk());
+        // 회원 관리는 관리자 전용 — 일반 사용자는 403 (인증은 됐으니 401 아님)
+        mockMvc.perform(get("/api/admin/users").header("Authorization", basic("kim", "pw1234")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void userMappingApis_adminOnly() throws Exception {
+        // v0.0.82: 사용자 관리 탭(Slack↔Jira·GitHub↔Jira 매핑) 은 관리자 전용 — 일반 사용자는 조회·변경 모두 403.
+        givenDbUser("kim", "pw1234", true);
+        String kim = basic("kim", "pw1234");
+        mockMvc.perform(get("/api/user-mappings").header("Authorization", kim)).andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/github-mappings").header("Authorization", kim)).andExpect(status().isForbidden());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .delete("/api/user-mappings/U123").header("Authorization", kim))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/github-mappings").header("Authorization", kim)
+                        .contentType("application/json").content("{}"))
+                .andExpect(status().isForbidden());
+
+        // 관리자는 그대로 사용 가능
+        mockMvc.perform(get("/api/user-mappings").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/github-mappings").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk());
+        // 무인증은 여전히 401
+        mockMvc.perform(get("/api/user-mappings")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void artifactFolders_anyoneManages_onlyAdminDeletes() throws Exception {
+        // v0.0.86: 폴더 만들기·이름 변경은 로그인한 누구나, 삭제는 관리자만.
+        givenDbUser("kim", "pw1234", true);
+        String kim = basic("kim", "pw1234");
+        org.mockito.Mockito.when(artifactFolderRepository.save(org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(inv -> inv.getArgument(0));
+        org.mockito.Mockito.when(artifactFolderRepository.existsById(3L)).thenReturn(true);
+
+        mockMvc.perform(get("/api/artifact-folders").header("Authorization", kim)).andExpect(status().isOk());
+        mockMvc.perform(post("/api/artifact-folders").header("Authorization", kim)
+                        .contentType("application/json").content("{\"name\":\"설계\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .delete("/api/artifact-folders/3").header("Authorization", kim))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .delete("/api/artifact-folders/3").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/artifact-folders")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void admin_canUseAdminApi() throws Exception {
+        mockMvc.perform(get("/api/admin/users").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void dbUser_wrongPassword_or_disabled_or_unknown_401() throws Exception {
+        givenDbUser("kim", "pw1234", true);
+        mockMvc.perform(get("/api/artifacts").header("Authorization", basic("kim", "nope")))
+                .andExpect(status().isUnauthorized());
+
+        givenDbUser("lee", "pw1234", false);   // 비활성화 계정
+        mockMvc.perform(get("/api/artifacts").header("Authorization", basic("lee", "pw1234")))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/api/artifacts").header("Authorization", basic("ghost", "pw1234")))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void adminApi_requiresLogin() throws Exception {
+        mockMvc.perform(get("/api/admin/users")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void me_reportsAdminFlag() throws Exception {
+        mockMvc.perform(get("/api/dashboard/me").header("Authorization", basic("sol", "test-pw")))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .jsonPath("$.admin").value(true))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .jsonPath("$.displayName").value("김영현"));
+        givenDbUser("kim", "pw1234", true);
+        mockMvc.perform(get("/api/dashboard/me").header("Authorization", basic("kim", "pw1234")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .jsonPath("$.admin").value(false))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .jsonPath("$.displayName").value("테스트"));
+    }
+
+    @Test
+    void wrongPasswordIsRejected() throws Exception {
+        mockMvc.perform(get("/api/artifacts").header("Authorization", basic("sol", "wrong")))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void actuatorHealthStaysPublic() throws Exception {
+        // start.sh / jdk-watchdog.sh / 봇상태 카드가 자격증명 없이 호출 — 로그인 대상에서 제외 유지.
+        mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk());
+    }
+
+    private static String basic(String user, String password) {
+        return "Basic " + java.util.Base64.getEncoder()
+                .encodeToString((user + ":" + password).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     @Test

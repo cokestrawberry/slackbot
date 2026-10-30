@@ -2,65 +2,62 @@ package main
 
 import (
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
+// v0.0.79: 인증은 Spring 전담 — 프록시는 순수 전달. 여기서는 "그대로 전달/중계" 만 검증한다.
+
 func newTestProxy(t *testing.T, upstream string) *DashboardProxy {
 	t.Helper()
-	d, err := NewDashboardProxy(upstream, "admin", "secret", slog.Default())
+	d, err := NewDashboardProxy(upstream)
 	if err != nil {
 		t.Fatalf("NewDashboardProxy: %v", err)
 	}
 	return d
 }
 
-func TestDashboardProxy_NoCredentials_Returns401(t *testing.T) {
-	hit := false
+func TestDashboardProxy_PassesAuthorizationHeaderUnchanged(t *testing.T) {
+	// DB 사용자(관리자 아닌 계정)의 자격증명도 Spring 까지 그대로 가야 한다 — 프록시가 막으면 일반 사용자 전원 로그인 불가.
+	var gotUser, gotPass string
+	var gotOK bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
+		gotUser, gotPass, gotOK = r.BasicAuth()
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
 
-	d := newTestProxy(t, upstream.URL)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
+	req.SetBasicAuth("kim", "pw1234")
 	rec := httptest.NewRecorder()
-	d.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/", nil))
+	newTestProxy(t, upstream.URL).ServeHTTP(rec, req)
+
+	if !gotOK || gotUser != "kim" || gotPass != "pw1234" {
+		t.Fatalf("upstream basic auth = (%q,%q,%v), want (kim,pw1234,true)", gotUser, gotPass, gotOK)
+	}
+}
+
+func TestDashboardProxy_RelaysUpstream401WithChallenge(t *testing.T) {
+	// 무인증이면 Spring 의 401 + WWW-Authenticate 가 브라우저까지 와야 로그인 팝업이 뜬다.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="sol dashboard"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	rec := httptest.NewRecorder()
+	newTestProxy(t, upstream.URL).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/", nil))
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 	if rec.Header().Get("WWW-Authenticate") == "" {
-		t.Fatal("missing WWW-Authenticate header (browser prompt depends on it)")
-	}
-	if hit {
-		t.Fatal("upstream must not be reached without credentials")
+		t.Fatal("missing WWW-Authenticate (browser login prompt depends on it)")
 	}
 }
 
-func TestDashboardProxy_WrongPassword_Returns401(t *testing.T) {
-	hit := false
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
-	}))
-	defer upstream.Close()
-
-	d := newTestProxy(t, upstream.URL)
-	req := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
-	req.SetBasicAuth("admin", "wrong")
-	rec := httptest.NewRecorder()
-	d.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
-	if hit {
-		t.Fatal("upstream must not be reached with wrong password")
-	}
-}
-
-func TestDashboardProxy_ValidCredentials_ProxiesPathAndQuery(t *testing.T) {
+func TestDashboardProxy_ProxiesPathAndQuery(t *testing.T) {
 	var gotPath, gotQuery string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -70,15 +67,9 @@ func TestDashboardProxy_ValidCredentials_ProxiesPathAndQuery(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	d := newTestProxy(t, upstream.URL)
-	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/trends?weeks=12", nil)
-	req.SetBasicAuth("admin", "secret")
 	rec := httptest.NewRecorder()
-	d.ServeHTTP(rec, req)
+	newTestProxy(t, upstream.URL).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/dashboard/trends?weeks=12", nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
 	if gotPath != "/api/dashboard/trends" || gotQuery != "weeks=12" {
 		t.Fatalf("upstream got %q?%q, want /api/dashboard/trends?weeks=12", gotPath, gotQuery)
 	}
@@ -96,13 +87,49 @@ func TestDashboardProxy_ProxiesPostMethod(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	d := newTestProxy(t, upstream.URL)
-	req := httptest.NewRequest(http.MethodPost, "/api/dashboard/actions/sync", nil)
-	req.SetBasicAuth("admin", "secret")
 	rec := httptest.NewRecorder()
-	d.ServeHTTP(rec, req)
+	newTestProxy(t, upstream.URL).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/admin/users", nil))
 
 	if gotMethod != http.MethodPost {
-		t.Fatalf("upstream method = %q, want POST (수동 동기화 버튼)", gotMethod)
+		t.Fatalf("upstream method = %q, want POST", gotMethod)
+	}
+}
+
+func TestDashboardProxy_SubPathsPreserved(t *testing.T) {
+	// 아티팩트 자산(한글 파일명)·리뷰 페이지 하위 경로가 훼손 없이 전달되어야 한다.
+	for _, path := range []string{
+		"/artifacts/view/1/page_files/%EC%9D%B4%EB%AF%B8%EC%A7%80.png",
+		"/artifacts/review/1",
+		"/api/admin/users/3",
+	} {
+		var gotPath string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.EscapedPath()
+			w.WriteHeader(http.StatusOK)
+		}))
+		rec := httptest.NewRecorder()
+		newTestProxy(t, upstream.URL).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		upstream.Close()
+		if gotPath != path {
+			t.Fatalf("upstream path = %q, want %q", gotPath, path)
+		}
+	}
+}
+
+func TestRootRedirect_OnlyExactRoot(t *testing.T) {
+	// 도메인만 열면 대시보드로 이동, 그 외 미등록 경로는 여전히 404 (루트 패턴이 전체를 삼키면 안 됨).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{$}", RootRedirect)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/dashboard/" {
+		t.Fatalf("GET / = %d Location=%q, want 302 /dashboard/", rec.Code, rec.Header().Get("Location"))
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/random-path", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /random-path = %d, want 404", rec.Code)
 	}
 }

@@ -12,9 +12,9 @@ public record IntentProperties(
 ) {
     public IntentProperties {
         if (model == null || model.isBlank()) model = "claude-haiku-4-5";
-        // Haiku 정상 호출은 6~8s 이나 일부 입력 (캐시 미스 / 긴 출력) 에서 20s+ outlier 관찰됨.
-        // 15s 는 outlier 를 잡지 못해 conf=0 fallback 으로 떨어지므로 25s 로 여유 확보.
-        if (timeoutSeconds <= 0) timeoutSeconds = 25;
+        // thinking 차단(v0.0.58) 후 정상 호출은 2~4s — 15s 면 outlier 커버 + 재시도 3회 예산 최악 45s.
+        // (thinking 켜져 있던 시절엔 6~24s+ outlier 라 40s 였음)
+        if (timeoutSeconds <= 0) timeoutSeconds = 15;
         if (promptFile == null || promptFile.isBlank()) promptFile = "prompts/haiku-classifier.md";
     }
 

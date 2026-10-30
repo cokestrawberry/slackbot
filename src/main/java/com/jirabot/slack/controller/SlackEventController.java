@@ -25,6 +25,7 @@ import com.jirabot.slack.service.IssueSearchService;
 import com.jirabot.slack.service.JiraSyncService;
 import com.jirabot.slack.service.ReminderSubscriptionService;
 import com.jirabot.slack.service.SprintReportService;
+import com.jirabot.slack.util.IssueCommandParser;
 import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -72,6 +73,13 @@ public class SlackEventController {
               `@지라 검색 <키워드>` — 이슈 제목/설명으로 검색 (예: `@지라 검색 preset`)
               `@지라 ES2-123` — 이슈 키로 상세 카드 조회 (상태 전환 버튼 포함)
               `@지라 할당 ES2-123 홍길동` — 이슈 담당자 지정 (@멘션도 가능)
+              `@지라 ES2-123 담당자를 홍길동으로` — 자연어 담당자 변경 · `ES2-123 담당자 누구야` — 담당자 조회(카드)
+              `@지라 하위작업 ES2-123 <내용>` — 특정 이슈 아래 하위작업 생성 (스레드 밖에서도 키/이름으로 지정 가능)
+              `@지라 ES2-1이 ES2-2에 막혀있어` — 이슈 링크 생성 (blocks/relates/duplicate, 방향 모호 시 확인 버튼)
+              `@지라 ES2-123 SP 3으로 변경` — SP/제목/마감일/우선순위 수정 (제목은 따옴표 필요)
+              `@지라 ES2-123 스프린트로 옮겨줘` — 현재 활성 스프린트로 이동
+              `@지라 ES2-123 링크 보여줘` — 이슈 링크 목록 조회
+              `@지라 ES2-1 ES2-2 링크 해제` — 두 이슈 사이 링크 제거
               `@지라 할당알림 on` / `off` / `상태` — 이슈가 나에게 할당되면 DM 알림 (기본 ON)
               `@지라 리마인더 on` / `off` / `상태` — 평일 09:00 미해결 이슈 DM 알림 토글
               `@지라 notion백필` — Jira 전체 버그를 Notion '버그 현황' DB로 동기화
@@ -124,6 +132,7 @@ public class SlackEventController {
     private final BugQueryService bugQueryService;
     private final JiraSyncService jiraSyncService;
     private final JiraApiClient jiraApiClient;
+    private final com.jirabot.slack.client.ClaudeApiClient claudeApiClient;
     private final JiraProperties jiraProps;
     private final IssueRepository issueRepository;
     private final IntentClassifier intentClassifier;
@@ -144,6 +153,7 @@ public class SlackEventController {
                                 BugQueryService bugQueryService,
                                 JiraSyncService jiraSyncService,
                                 JiraApiClient jiraApiClient,
+                                com.jirabot.slack.client.ClaudeApiClient claudeApiClient,
                                 JiraProperties jiraProps,
                                 IssueRepository issueRepository,
                                 IntentClassifier intentClassifier,
@@ -163,6 +173,7 @@ public class SlackEventController {
         this.bugQueryService = bugQueryService;
         this.jiraSyncService = jiraSyncService;
         this.jiraApiClient = jiraApiClient;
+        this.claudeApiClient = claudeApiClient;
         this.jiraProps = jiraProps;
         this.issueRepository = issueRepository;
         this.intentClassifier = intentClassifier;
@@ -208,7 +219,22 @@ public class SlackEventController {
             java.util.regex.Pattern.compile("^\\s*<@[A-Z0-9]+>\\s*");
 
     static String stripMention(String text) {
+        return stripMention(text, null);
+    }
+
+    // STUDY: 봇 멘션이 문장 중간(예: 다른 사람에게 한 말 다음 줄)에 있으면 Slack 은 메시지 "전체"를
+    //        보낸다 — 봇 멘션 "이후" 텍스트만 명령이다. 멘션 앞 내용(@박민석 님, …)이 분류에 섞여
+    //        엉뚱한 제목/개행이 들어가던 실사고 수정 (v0.0.64). botUserId 는 envelope.authorizations 로 식별,
+    //        없으면(테스트/구형 페이로드) 기존 선두-멘션 제거로 폴백.
+    static String stripMention(String text, String botUserId) {
         if (text == null) return "";
+        if (botUserId != null && !botUserId.isBlank()) {
+            String marker = "<@" + botUserId + ">";
+            int i = text.indexOf(marker);
+            if (i >= 0) {
+                return text.substring(i + marker.length()).strip();
+            }
+        }
         return MENTION_PATTERN.matcher(text).replaceFirst("").strip();
     }
 
@@ -328,6 +354,16 @@ public class SlackEventController {
             return;
         }
 
+        // STUDY: 1.45차 — 명령형 `하위작업 <KEY> <내용>` prefix 만 즉시 실행("간단한 건 빠르게").
+        //        NL 형("ES2-1에 하위작업으로 'X' 추가", "담당자를 X로", "SP 3으로", 링크 등)은 v0.0.65부터
+        //        정규식이 아니라 Haiku(issue_action) → Sonnet skill-issue-action 이 원문을 받아 추출한다 —
+        //        표현 변형마다 정규식 핫픽스가 반복되던 문제(v0.0.61/64)의 구조적 해결.
+        Optional<IssueCommandParser.SubtaskCommand> subtaskCmd = IssueCommandParser.parseSubtaskPrefix(cleaned);
+        if (subtaskCmd.isPresent()) {
+            handleSubtaskCommand(event, subtaskCmd.get());
+            return;
+        }
+
         // 1.5차: 에픽 키워드 트리거 — `에픽`/`epic` 이 단어로 포함되면 AI 분류를 거치지 않고
         //        결정적으로 에픽 생성. 스토리/버그(Haiku/Sonnet 분류)와 확실히 구별되는 특이 케이스.
         //        스레드 안에서도 우선 적용 — 에픽은 하위작업이 될 수 없기 때문.
@@ -359,7 +395,7 @@ public class SlackEventController {
         // 스레드 키워드 매칭
         if (lower.startsWith("하위작업 ") || lower.startsWith("subtask ")) {
             String content = cleaned.substring(cleaned.indexOf(' ') + 1).strip();
-            executeSubTask(event, parentIssue, content);
+            executeSubTask(event, parentIssue.getIssueKey(), content, threadTs);
             return;
         }
         if (lower.startsWith("댓글 ") || lower.startsWith("comment ")) {
@@ -401,7 +437,7 @@ public class SlackEventController {
 
             String content = action.extracted() != null ? action.extracted().getOrDefault("content", cleaned) : cleaned;
             switch (action.action()) {
-                case "sub_task" -> executeSubTask(event, parentIssue, content);
+                case "sub_task" -> executeSubTask(event, parentIssue.getIssueKey(), content, threadTs);
                 case "comment" -> executeComment(event, parentIssue, content);
                 case "modify" -> executeModify(event, parentIssue, content);
                 case "complete" -> handleComplete(event);
@@ -413,14 +449,15 @@ public class SlackEventController {
 
     // STUDY: 하위작업 생성도 Jira 이슈를 만드는 행위이므로 등록 여부를 체크한다.
     //        미등록 사용자는 등록 안내 메시지를 받고, 등록된 사용자만 하위작업을 생성할 수 있다.
-    private void executeSubTask(SlackEventInner event, IssueEntity parentIssue, String content) {
+    //        replyTs 로 응답 위치를 통일한다 — 스레드 경로는 thread_ts, 스레드 밖 명령은 event.ts.
+    private void executeSubTask(SlackEventInner event, String parentKey, String content, String replyTs) {
         slackExecutor.execute(() -> {
             try {
                 // 등록 여부 확인
                 var mapping = userMappingRepository.findBySlackUserId(event.user());
                 if (mapping.isEmpty()) {
                     log.info("Sub-task creation blocked - unregistered user={}", event.user());
-                    replyInThread(event, event.thread_ts(),
+                    replyInThread(event, replyTs,
                             ":warning: Jira 계정이 연결되지 않았습니다.\n"
                             + "먼저 아래 명령으로 등록해주세요:\n"
                             + "`@지라 등록 <Jira에 표시되는 이름>`\n"
@@ -435,17 +472,462 @@ public class SlackEventController {
 
                 String jiraAccountId = mapping.get().getJiraAccountId();
                 String subKey = jiraApiClient.createSubTask(
-                        parentIssue.getIssueKey(), classification.title(),
+                        parentKey, classification.title(),
                         classification.storyPoint(), jiraAccountId);
-                replyInThread(event, event.thread_ts(), String.format(
+                replyInThread(event, replyTs, String.format(
                         ":white_check_mark: 하위작업 생성: *%s* %s (SP %d)\n상위: %s",
-                        subKey, classification.title(), classification.storyPoint(), parentIssue.getIssueKey()));
+                        subKey, classification.title(), classification.storyPoint(), parentKey));
             } catch (Exception e) {
                 log.error("Sub-task creation failed: {}", e.toString());
-                replyInThread(event, event.thread_ts(),
+                replyInThread(event, replyTs,
                         ":x: 하위작업 생성에 실패했습니다: " + e.getMessage());
             }
         });
+    }
+
+    // STUDY: 특정 부모(키/이름) 아래 하위작업 생성 — 스레드 밖 명령. 네트워크 검증(이슈 조회)이 있어
+    //        slackExecutor 에서 수행한 뒤 executeSubTask 로 실제 생성을 위임한다(응답은 원 메시지 스레드).
+    private void handleSubtaskCommand(SlackEventInner event, IssueCommandParser.SubtaskCommand cmd) {
+        String replyTs = event.thread_ts() != null ? event.thread_ts() : event.ts();
+        slackExecutor.execute(() -> {
+            try {
+                String parentKey = cmd.parentKey();
+                if (parentKey == null) {
+                    // 이름형 — 에픽 언급이면 하위작업 불가 안내(에픽 직속 하위작업 금지)
+                    if (containsEpicKeyword(cmd.parentName())) {
+                        replyInThread(event, replyTs,
+                                ":no_entry: 에픽 아래에는 하위작업을 직접 만들 수 없어요.\n"
+                                + "`<에픽명> 에픽 아래 스토리 만들어줘` 로 스토리를 연결한 뒤 그 스토리에 하위작업을 달아보세요.");
+                        return;
+                    }
+                    var found = jiraApiClient.findIssueKeyByName(cmd.parentName());
+                    if (found.isEmpty()) {
+                        replyInThread(event, replyTs, String.format(
+                                ":mag: '%s' 이슈를 찾을 수 없어요. 이슈 키(예: ES2-123)로 지정해보세요.", cmd.parentName()));
+                        return;
+                    }
+                    parentKey = found.get();
+                }
+
+                if (cmd.content() == null || cmd.content().isBlank()) {
+                    replyInThread(event, replyTs, String.format(
+                            ":warning: 하위작업 내용을 함께 적어주세요. 예: `@지라 하위작업 %s 로그인 리팩토링`", parentKey));
+                    return;
+                }
+
+                // 부모 이슈 검증 — 존재/서브태스크/에픽 여부
+                var parent = jiraApiClient.getIssue(parentKey);
+                if (parent.isEmpty()) {
+                    replyInThread(event, replyTs, String.format(
+                            ":mag: *%s* 이슈를 찾을 수 없어요. 키를 확인해주세요.", parentKey));
+                    return;
+                }
+                var p = parent.get();
+                if (p.subtask()) {
+                    replyInThread(event, replyTs, String.format(
+                            ":no_entry: *%s* 은(는) 하위작업이라 그 아래에 하위작업을 만들 수 없어요.", parentKey));
+                    return;
+                }
+                if (isEpicType(p.issueType())) {
+                    replyInThread(event, replyTs, String.format(
+                            ":no_entry: *%s* 은(는) 에픽이라 하위작업을 직접 만들 수 없어요.\n"
+                            + "`%s 에픽 아래 스토리 만들어줘` 로 스토리를 연결해보세요.", parentKey, parentKey));
+                    return;
+                }
+
+                executeSubTask(event, parentKey, cmd.content(), replyTs);
+            } catch (Exception e) {
+                log.error("Subtask command failed: {}", e.toString());
+                replyInThread(event, replyTs, ":x: 하위작업 처리 중 오류가 발생했어요: " + e.getMessage());
+            }
+        });
+    }
+
+    // STUDY: NL 이슈 조작 디스패치 (v0.0.65) — Sonnet 이 추출한 IssueActionSpec 을 검증 후
+    //        "기존 실행부"로 위임한다. 파싱만 스킬로 바뀌었고 실행/검증(SP 스케일, 이름 해석 체인,
+    //        링크 방향 확인 버튼, 부모 에픽/서브태스크 거부)은 전부 재사용.
+    private void handleIssueAction(SlackEventInner event, String cleaned) {
+        var spec = claudeApiClient.extractIssueAction(cleaned);
+        log.info("Issue action extracted: action={} key={} conf={}",
+                spec.action(), spec.issueKey(), spec.confidence());
+
+        if (!spec.isActionable()) {
+            intentFailureRepository.save(new IntentFailureEntity(
+                    cleaned, "UNPARSED_ISSUE_ACTION",
+                    String.format("action=%s, confidence=%.2f", spec.action(), spec.confidence()),
+                    event.user(), event.channel()));
+            replyThread(event, ":thinking_face: 무엇을 바꿀지 파악하지 못했어요. 예: "
+                    + "`ES2-123 담당자를 홍길동으로` · `ES2-123 SP 3으로` · `ES2-1이 ES2-2에 막혀있어 연결` · "
+                    + "`하위작업 ES2-123 <내용>`");
+            return;
+        }
+
+        switch (spec.action()) {
+            case "assign" -> {
+                if (spec.issueKey() == null || spec.assignee() == null) {
+                    replyThread(event, ":warning: 사용법: `@지라 ES2-123 담당자를 홍길동으로`");
+                    return;
+                }
+                executeAssign(event, spec.issueKey(), spec.assignee());
+            }
+            case "update_sp" -> {
+                Integer sp = spec.value() == null ? null : parseIntOrNull(spec.value());
+                dispatchUpdate(event, spec.issueKey(), IssueCommandParser.UpdateField.STORY_POINT, sp);
+            }
+            case "update_summary" ->
+                    dispatchUpdate(event, spec.issueKey(), IssueCommandParser.UpdateField.SUMMARY, spec.value());
+            case "update_due" ->
+                    dispatchUpdate(event, spec.issueKey(), IssueCommandParser.UpdateField.DUE_DATE, spec.value());
+            case "update_priority" ->
+                    dispatchUpdate(event, spec.issueKey(), IssueCommandParser.UpdateField.PRIORITY, spec.value());
+            case "sprint_move" -> {
+                if (spec.issueKey() == null) {
+                    replyThread(event, ":warning: 사용법: `@지라 ES2-123 스프린트로 옮겨줘`");
+                    return;
+                }
+                handleSprintMove(event, spec.issueKey());
+            }
+            case "link" -> {
+                String inward = spec.inwardKey() != null ? spec.inwardKey() : spec.issueKey();
+                String outward = spec.outwardKey() != null ? spec.outwardKey() : spec.otherKey();
+                if (inward == null || outward == null) {
+                    replyThread(event, ":warning: 링크할 두 이슈 키를 함께 적어주세요. 예: `ES2-1이 ES2-2에 막혀있어 연결`");
+                    return;
+                }
+                // 방향 미확신이면 기존 확인 버튼 카드 경로(ambiguous=true).
+                handleLinkCommand(event, new IssueCommandParser.LinkCommand(
+                        inward, outward, toLinkRelation(spec.linkType()),
+                        !Boolean.TRUE.equals(spec.directionConfident())));
+            }
+            case "unlink" -> {
+                if (spec.issueKey() == null || spec.otherKey() == null) {
+                    replyThread(event, ":warning: 사용법: `@지라 ES2-1 ES2-2 링크 해제`");
+                    return;
+                }
+                handleUnlink(event, spec.issueKey(), spec.otherKey());
+            }
+            case "list_links" -> {
+                if (spec.issueKey() == null) {
+                    replyThread(event, ":warning: 사용법: `@지라 ES2-123 링크 보여줘`");
+                    return;
+                }
+                handleLinkList(event, spec.issueKey());
+            }
+            case "subtask" ->
+                    handleSubtaskCommand(event, new IssueCommandParser.SubtaskCommand(
+                            spec.issueKey(), spec.parentName(),
+                            spec.content() == null ? "" : spec.content()));
+            default -> replyThread(event, ":thinking_face: 지원하지 않는 작업이에요.");
+        }
+    }
+
+    private void dispatchUpdate(SlackEventInner event, String key,
+                                IssueCommandParser.UpdateField field, Object value) {
+        if (key == null) {
+            replyThread(event, ":warning: 대상 이슈 키를 함께 적어주세요. 예: `ES2-123 SP 3으로`");
+            return;
+        }
+        handleUpdateCommand(event, new IssueCommandParser.UpdateCommand(key, field, value));
+    }
+
+    private static Integer parseIntOrNull(String s) {
+        try {
+            return Integer.valueOf(s.strip());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static IssueCommandParser.LinkRelation toLinkRelation(String linkType) {
+        if (linkType == null) return IssueCommandParser.LinkRelation.RELATES;
+        return switch (linkType.toLowerCase()) {
+            case "blocks" -> IssueCommandParser.LinkRelation.BLOCKS;
+            case "duplicate" -> IssueCommandParser.LinkRelation.DUPLICATE;
+            default -> IssueCommandParser.LinkRelation.RELATES;
+        };
+    }
+
+    // STUDY: 이슈 링크 명령 처리 — 확신 방향은 즉시 실행, 모호하면 확인 버튼 카드.
+    private void handleLinkCommand(SlackEventInner event, IssueCommandParser.LinkCommand cmd) {
+        String replyTs = event.thread_ts() != null ? event.thread_ts() : event.ts();
+        slackExecutor.execute(() -> {
+            try {
+                var type = resolveLinkType(cmd.relation());
+                if (type.isEmpty()) {
+                    String available = jiraApiClient.getIssueLinkTypes().stream()
+                            .map(com.jirabot.slack.client.dto.IssueLinkType::name)
+                            .reduce((x, y) -> x + ", " + y).orElse("(없음)");
+                    replyInThread(event, replyTs, String.format(
+                            ":x: '%s' 링크 타입을 찾을 수 없어요. 사용 가능: %s", cmd.relation(), available));
+                    return;
+                }
+                var lt = type.get();
+
+                if (cmd.ambiguous()) {
+                    // 방향 모호 → 확인 버튼 (outward 설명을 동사로 표기)
+                    String blocks = com.jirabot.slack.util.BlockKitBuilder.buildLinkConfirmButtons(
+                            cmd.inwardKey(), cmd.outwardKey(), lt.outward(), lt.name());
+                    slackNotifier.postBlockMessage(event.channel(), replyTs, "링크 방향 확인", blocks);
+                    return;
+                }
+
+                boolean ok = jiraApiClient.linkIssues(cmd.inwardKey(), cmd.outwardKey(), lt.name());
+                replyInThread(event, replyTs, ok
+                        ? String.format(":link: *%s* %s *%s* (%s)",
+                                cmd.outwardKey(), lt.outward(), cmd.inwardKey(), lt.name())
+                        : String.format(":x: *%s* ↔ *%s* 링크 생성에 실패했어요.",
+                                cmd.outwardKey(), cmd.inwardKey()));
+            } catch (Exception e) {
+                log.error("Link command failed: {}", e.toString());
+                replyInThread(event, replyTs, ":x: 링크 처리 중 오류가 발생했어요: " + e.getMessage());
+            }
+        });
+    }
+
+    // STUDY: 관계(BLOCKS/RELATES/DUPLICATE) → 사이트에 정의된 실제 링크 타입. name/inward/outward 어디든
+    //        후보 단어가 포함되면 매칭(로컬라이즈 대비, L4). POST 엔 API 가 준 정확한 name 을 쓴다.
+    private Optional<com.jirabot.slack.client.dto.IssueLinkType> resolveLinkType(
+            IssueCommandParser.LinkRelation rel) {
+        List<String> candidates = switch (rel) {
+            case BLOCKS -> List.of("blocks", "block", "차단");
+            case RELATES -> List.of("relates", "relate", "관련");
+            case DUPLICATE -> List.of("duplicate", "중복");
+        };
+        for (var t : jiraApiClient.getIssueLinkTypes()) {
+            String hay = ((t.name() == null ? "" : t.name()) + " "
+                    + (t.inward() == null ? "" : t.inward()) + " "
+                    + (t.outward() == null ? "" : t.outward())).toLowerCase();
+            for (String c : candidates) {
+                if (hay.contains(c.toLowerCase())) {
+                    return Optional.of(t);
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    // STUDY: 단일 이슈 필드 수정(SP/제목/마감일/우선순위). 값이 없거나 유효하지 않으면 안내만 하고 API 호출 안 함.
+    private void handleUpdateCommand(SlackEventInner event, IssueCommandParser.UpdateCommand cmd) {
+        String replyTs = event.thread_ts() != null ? event.thread_ts() : event.ts();
+        slackExecutor.execute(() -> {
+            try {
+                switch (cmd.field()) {
+                    case STORY_POINT -> {
+                        Integer sp = (Integer) cmd.value();
+                        if (sp == null) {
+                            replyInThread(event, replyTs, String.format(
+                                    ":warning: 변경할 Story Point를 적어주세요. 예: `@지라 %s SP 3으로 변경`", cmd.key()));
+                            return;
+                        }
+                        if (!IssueCommandParser.VALID_STORY_POINTS.contains(sp)) {
+                            replyInThread(event, replyTs, String.format(
+                                    ":warning: Story Point는 1·2·3·5·8 중 하나여야 해요 (입력: %d).\n"
+                                    + "1=반나절, 2=하루, 3=1~2일, 5=2~3일, 8=3~4일(스프린트 최대)", sp));
+                            return;
+                        }
+                        boolean ok = jiraApiClient.updateIssueFields(
+                                cmd.key(), Map.of(jiraProps.storyPointField(), (double) sp));
+                        if (ok) {
+                            issueRepository.findByIssueKey(cmd.key()).ifPresent(i -> {
+                                i.setStoryPoint((double) sp);
+                                issueRepository.save(i);
+                            });
+                        }
+                        replyInThread(event, replyTs, ok
+                                ? String.format(":pencil2: *%s* Story Point를 %d로 변경했어요.", cmd.key(), sp)
+                                : String.format(":x: *%s* SP 변경에 실패했어요.", cmd.key()));
+                    }
+                    case SUMMARY -> {
+                        String title = (String) cmd.value();
+                        if (title == null || title.isBlank()) {
+                            replyInThread(event, replyTs, String.format(
+                                    ":warning: 새 제목을 따옴표로 감싸주세요. 예: `@지라 %s 제목을 '새 제목'으로 변경`", cmd.key()));
+                            return;
+                        }
+                        boolean ok = jiraApiClient.updateIssueFields(cmd.key(), Map.of("summary", title));
+                        if (ok) {
+                            issueRepository.findByIssueKey(cmd.key()).ifPresent(i -> {
+                                i.setSummary(title);
+                                issueRepository.save(i);
+                            });
+                        }
+                        replyInThread(event, replyTs, ok
+                                ? String.format(":pencil2: *%s* 제목을 \"%s\"(으)로 변경했어요.", cmd.key(), title)
+                                : String.format(":x: *%s* 제목 변경에 실패했어요.", cmd.key()));
+                    }
+                    case DUE_DATE -> {
+                        String token = (String) cmd.value();
+                        Optional<LocalDate> date = token == null ? Optional.empty() : resolveDueDate(token);
+                        if (date.isEmpty()) {
+                            replyInThread(event, replyTs, String.format(
+                                    ":warning: 마감일을 인식하지 못했어요. 예: `@지라 %s 마감일 2026-07-10` / `금요일` / `내일`", cmd.key()));
+                            return;
+                        }
+                        String iso = date.get().toString();
+                        boolean ok = jiraApiClient.updateIssueFields(cmd.key(), Map.of("duedate", iso));
+                        replyInThread(event, replyTs, ok
+                                ? String.format(":calendar: *%s* 마감일을 %s(으)로 설정했어요.", cmd.key(), iso)
+                                : String.format(":x: *%s* 마감일 설정에 실패했어요.", cmd.key()));
+                    }
+                    case PRIORITY -> {
+                        String bucket = (String) cmd.value();
+                        Optional<String> name = bucket == null ? Optional.empty() : resolvePriorityName(bucket);
+                        if (name.isEmpty()) {
+                            String available = jiraApiClient.getPriorities().stream()
+                                    .map(com.jirabot.slack.client.dto.PriorityInfo::name)
+                                    .reduce((x, y) -> x + ", " + y).orElse("(없음)");
+                            replyInThread(event, replyTs, String.format(
+                                    ":warning: 우선순위를 인식하지 못했어요. 사용 가능: %s", available));
+                            return;
+                        }
+                        boolean ok = jiraApiClient.updateIssueFields(
+                                cmd.key(), Map.of("priority", Map.of("name", name.get())));
+                        replyInThread(event, replyTs, ok
+                                ? String.format(":arrow_up_small: *%s* 우선순위를 %s(으)로 변경했어요.", cmd.key(), name.get())
+                                : String.format(":x: *%s* 우선순위 변경에 실패했어요.", cmd.key()));
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Update command failed for {}: {}", cmd.key(), e.toString());
+                replyInThread(event, replyTs, ":x: 필드 수정 중 오류가 발생했어요: " + e.getMessage());
+            }
+        });
+    }
+
+    // STUDY: 마감일 토큰 → KST 기준 ISO 날짜. 절대(yyyy.MM.dd / MM.dd) + 상대(오늘/내일/모레/글피/다음주) + 요일(다음 도래일).
+    private Optional<LocalDate> resolveDueDate(String token) {
+        String t = token.strip().toLowerCase();
+        LocalDate today = LocalDate.now(KST);
+        Matcher full = java.util.regex.Pattern.compile("(\\d{4})[.\\-/](\\d{1,2})[.\\-/](\\d{1,2})").matcher(t);
+        if (full.find()) {
+            try {
+                return Optional.of(LocalDate.of(Integer.parseInt(full.group(1)),
+                        Integer.parseInt(full.group(2)), Integer.parseInt(full.group(3))));
+            } catch (Exception e) {
+                return Optional.empty();
+            }
+        }
+        switch (t) {
+            case "오늘": return Optional.of(today);
+            case "내일": return Optional.of(today.plusDays(1));
+            case "모레": return Optional.of(today.plusDays(2));
+            case "글피": return Optional.of(today.plusDays(3));
+            case "다음주", "다음 주": return Optional.of(today.plusDays(7));
+            default: break;
+        }
+        java.time.DayOfWeek dow = parseDayOfWeek(t);
+        if (dow != null) {
+            int diff = (dow.getValue() - today.getDayOfWeek().getValue() + 7) % 7;
+            return Optional.of(today.plusDays(diff == 0 ? 7 : diff)); // 같은 요일이면 다음 주로
+        }
+        Matcher md = java.util.regex.Pattern.compile("(?<!\\d)(\\d{1,2})[.\\-/](\\d{1,2})(?!\\d)").matcher(t);
+        if (md.find()) {
+            try {
+                return Optional.of(LocalDate.of(today.getYear(),
+                        Integer.parseInt(md.group(1)), Integer.parseInt(md.group(2))));
+            } catch (Exception e) {
+                return Optional.empty();
+            }
+        }
+        return Optional.empty();
+    }
+
+    private java.time.DayOfWeek parseDayOfWeek(String t) {
+        if (t.contains("월요일") || t.contains("monday")) return java.time.DayOfWeek.MONDAY;
+        if (t.contains("화요일") || t.contains("tuesday")) return java.time.DayOfWeek.TUESDAY;
+        if (t.contains("수요일") || t.contains("wednesday")) return java.time.DayOfWeek.WEDNESDAY;
+        if (t.contains("목요일") || t.contains("thursday")) return java.time.DayOfWeek.THURSDAY;
+        if (t.contains("금요일") || t.contains("friday")) return java.time.DayOfWeek.FRIDAY;
+        if (t.contains("토요일") || t.contains("saturday")) return java.time.DayOfWeek.SATURDAY;
+        if (t.contains("일요일") || t.contains("sunday")) return java.time.DayOfWeek.SUNDAY;
+        return null;
+    }
+
+    // STUDY: 정규 버킷(Highest/High/…) → 사이트 실제 우선순위 name. 정확 일치 우선, 없으면 부분 일치.
+    private Optional<String> resolvePriorityName(String bucket) {
+        var priorities = jiraApiClient.getPriorities();
+        for (var p : priorities) {
+            if (p.name() != null && p.name().equalsIgnoreCase(bucket)) {
+                return Optional.of(p.name());
+            }
+        }
+        for (var p : priorities) {
+            if (p.name() != null && p.name().toLowerCase().contains(bucket.toLowerCase())) {
+                return Optional.of(p.name());
+            }
+        }
+        return Optional.empty();
+    }
+
+    // STUDY: 활성 스프린트로 이동. moveToActiveSprint 내부에서 활성 스프린트를 조회하므로 없으면 false.
+    private void handleSprintMove(SlackEventInner event, String issueKey) {
+        String replyTs = event.thread_ts() != null ? event.thread_ts() : event.ts();
+        slackExecutor.execute(() -> {
+            try {
+                boolean ok = jiraApiClient.moveToActiveSprint(issueKey);
+                replyInThread(event, replyTs, ok
+                        ? String.format(":runner: *%s* 를 현재 스프린트로 옮겼어요.", issueKey)
+                        : String.format(":x: *%s* 스프린트 이동에 실패했어요 (활성 스프린트가 없을 수 있어요).", issueKey));
+            } catch (Exception e) {
+                log.error("Sprint move failed for {}: {}", issueKey, e.toString());
+                replyInThread(event, replyTs, ":x: 스프린트 이동 중 오류가 발생했어요: " + e.getMessage());
+            }
+        });
+    }
+
+    // STUDY: 이슈 링크 목록 조회 — 조회자 기준 관계 설명(description)으로 렌더.
+    private void handleLinkList(SlackEventInner event, String issueKey) {
+        String replyTs = event.thread_ts() != null ? event.thread_ts() : event.ts();
+        slackExecutor.execute(() -> {
+            try {
+                var links = jiraApiClient.getIssueLinks(issueKey);
+                if (links.isEmpty()) {
+                    replyInThread(event, replyTs, String.format(":link: *%s* 에 연결된 링크가 없어요.", issueKey));
+                    return;
+                }
+                StringBuilder sb = new StringBuilder(String.format(":link: *%s* 링크 (%d개)\n", issueKey, links.size()));
+                for (var l : links) {
+                    sb.append(String.format("• %s *%s*%s\n", l.description(), l.otherKey(),
+                            l.otherSummary() == null ? "" : " — " + l.otherSummary()));
+                }
+                replyInThread(event, replyTs, sb.toString().stripTrailing());
+            } catch (Exception e) {
+                log.error("Link list failed for {}: {}", issueKey, e.toString());
+                replyInThread(event, replyTs, ":x: 링크 조회 중 오류가 발생했어요: " + e.getMessage());
+            }
+        });
+    }
+
+    // STUDY: 링크 해제 — a 의 링크 중 상대가 b 인 것을 찾아 linkId 로 삭제. 재연결이 싸므로 확인 없이 즉시 실행.
+    private void handleUnlink(SlackEventInner event, String a, String b) {
+        String replyTs = event.thread_ts() != null ? event.thread_ts() : event.ts();
+        slackExecutor.execute(() -> {
+            try {
+                var links = jiraApiClient.getIssueLinks(a);
+                var target = links.stream()
+                        .filter(l -> b.equalsIgnoreCase(l.otherKey()))
+                        .findFirst();
+                if (target.isEmpty() || target.get().linkId() == null) {
+                    replyInThread(event, replyTs, String.format(
+                            ":information_source: *%s* 와 *%s* 사이에 링크가 없어요.", a, b));
+                    return;
+                }
+                boolean ok = jiraApiClient.deleteIssueLink(target.get().linkId());
+                replyInThread(event, replyTs, ok
+                        ? String.format(":broken_chain: *%s* ↔ *%s* 링크를 해제했어요.", a, b)
+                        : String.format(":x: *%s* ↔ *%s* 링크 해제에 실패했어요.", a, b));
+            } catch (Exception e) {
+                log.error("Unlink failed for {} / {}: {}", a, b, e.toString());
+                replyInThread(event, replyTs, ":x: 링크 해제 중 오류가 발생했어요: " + e.getMessage());
+            }
+        });
+    }
+
+    // STUDY: 이슈 타입명이 에픽인지 — 설정값(영문 정식명)과 한글 표시명 "에픽" 둘 다 비교(L4: 사이트가 한글 표시명 반환).
+    private boolean isEpicType(String issueType) {
+        if (issueType == null) return false;
+        String t = issueType.strip();
+        return t.equalsIgnoreCase(jiraProps.issueTypes().epic()) || t.equals("에픽");
     }
 
     private void executeComment(SlackEventInner event, IssueEntity parentIssue, String content) {
@@ -489,9 +971,18 @@ public class SlackEventController {
     private static final java.util.regex.Pattern EPIC_KEYWORD_EN =
             java.util.regex.Pattern.compile("(?i)\\bepic\\b");
 
+    // STUDY: "에픽 아래/밑/하위(에)" · "under epic" 은 에픽 "자체" 생성이 아니라 "에픽 하위에 이슈 생성"
+    //        요청 — 에픽 생성 트리거에서 제외해 일반 생성(+resolveParentEpic 연결) 경로로 보낸다 (v0.0.64).
+    //        "관련 에픽 아래에 만들어줄래"가 에픽 생성으로 오인되던 실사고 수정.
+    private static final java.util.regex.Pattern UNDER_EPIC_PATTERN = java.util.regex.Pattern.compile(
+            "(?i)(?:에픽|epic)\\s*(?:아래|밑|하위)|under\\s+(?:the\\s+)?epic");
+
     static boolean containsEpicKeyword(String cleaned) {
         if (cleaned == null || cleaned.isBlank()) {
             return false;
+        }
+        if (UNDER_EPIC_PATTERN.matcher(cleaned).find()) {
+            return false; // 에픽 하위 생성 요청 — 에픽 생성 아님
         }
         return EPIC_KEYWORD_KO.matcher(cleaned).find() || EPIC_KEYWORD_EN.matcher(cleaned).find();
     }
@@ -524,6 +1015,10 @@ public class SlackEventController {
             }
 
             switch (intent.intent()) {
+                case "issue_action" ->
+                        // STUDY: NL 이슈 조작 — Sonnet skill-issue-action 이 원문에서 액션을 추출하고
+                        //        Java 가 검증·실행 (extract-then-execute, v0.0.65).
+                        handleIssueAction(event, cleaned);
                 case "register_bug", "register_story" ->
                         issueCreateService.createFromSlackText(
                                 IssueCreateCommand.from(event, cleaned), intent);
@@ -543,7 +1038,9 @@ public class SlackEventController {
                 case "statistics" ->
                         handleStatistics(event);
                 case "my_tasks" ->
-                        handleMyWork(event);
+                        // STUDY: "완료 안된 task 알려줘" 처럼 미완료-한정 질의는 원문에서 결정적으로 감지해
+                        //        완료 이슈를 제외한다 (의도 분류만으로는 이 조건이 소실되던 버그 수정, v0.0.59).
+                        handleMyWork(event, wantsIncompleteOnly(cleaned));
                 case "sprint_report" ->
                         handleSprint(event);
                 case "sync_request" ->
@@ -639,8 +1136,22 @@ public class SlackEventController {
     }
 
     private void handleMyWork(SlackEventInner event) {
-        log.info("My work requested by user={}", event.user());
-        sprintReportService.generateMyReport(event.user())
+        handleMyWork(event, false);
+    }
+
+    // STUDY: 미완료-한정 질의("완료 안된/미완료/남은 …")를 결정적으로 감지. 부정 표현이 다양해
+    //        (완료 안/완료되지 않/완료 못한/미완료/안 끝난/남은/미해결) 넓게 잡되, 긍정 질의("완료된 것")는 제외.
+    private static final java.util.regex.Pattern INCOMPLETE_ONLY_PATTERN = java.util.regex.Pattern.compile(
+            "(?i)(완료\\s*(안|않|못|안된|안\\s*된|되지\\s*않)|미완료|안\\s*끝난|끝나지\\s*않|남은|남아\\s*있|미해결"
+                    + "|not\\s+done|incomplete|unfinished|remaining|open\\s+tasks?)");
+
+    static boolean wantsIncompleteOnly(String text) {
+        return text != null && INCOMPLETE_ONLY_PATTERN.matcher(text).find();
+    }
+
+    private void handleMyWork(SlackEventInner event, boolean excludeDone) {
+        log.info("My work requested by user={} excludeDone={}", event.user(), excludeDone);
+        scrumReportService.generateMyReport(event.user(), excludeDone)
                 .thenAccept(report -> {
                     if (event.channel() != null && event.ts() != null) {
                         slackNotifier.postThreadReply(event.channel(), event.ts(), report);
@@ -786,8 +1297,11 @@ public class SlackEventController {
     //        나머지에 다른 내용이 있으면(서술문) null — 이슈 생성/검색 흐름을 가로채지 않는다.
     private static final java.util.regex.Pattern ISSUE_KEY_PATTERN =
             java.util.regex.Pattern.compile("[A-Z][A-Z0-9]*-\\d+");
+    // STUDY: "ES2-123 담당자 누구야" 같은 담당자 조회도 카드로 응답(카드에 담당자 필드 있음).
+    //        변경형("담당자를 X로")은 잔여에 이름이 남아 filler 불일치 → 1.42차 parseAssign 으로 넘어간다.
     private static final java.util.regex.Pattern CARD_FILLER_PATTERN = java.util.regex.Pattern.compile(
-            "(?i)^(이슈|조회|카드|보여줘|알려줘|상세|정보|상태|확인|show|info|detail|status|[\\s!?.~,]+)*$");
+            "(?i)^(이슈|조회|카드|보여줘|알려줘|상세|정보|상태|확인|담당자|누구(야|임|인지|인가요|에요|예요)?"
+                    + "|show|info|detail|status|assignee|who|[\\s!?.~,]+)*$");
 
     static String extractCardIssueKey(String cleaned) {
         if (cleaned == null || cleaned.isBlank()) {
@@ -872,11 +1386,19 @@ public class SlackEventController {
                     accountId = mapping.get().getJiraAccountId();
                     displayName = mapping.get().getJiraDisplayName();
                 } else {
-                    // STUDY: 이름 해석 — 등록된 매핑(정확 일치) 우선, 없으면 Jira user search 폴백.
-                    var mapping = userMappingRepository.findByJiraDisplayName(assigneeText);
-                    if (mapping.isPresent() && mapping.get().getJiraAccountId() != null) {
-                        accountId = mapping.get().getJiraAccountId();
-                        displayName = mapping.get().getJiraDisplayName();
+                    // STUDY: 이름 해석 체인 (v0.0.63) — 한국어 이름은 slack_display_name 에 있는 경우가 많아
+                    //        (예: slack=최아록 / jira=choiahrok) Jira 표시명만 보면 못 찾는다.
+                    //        1) jira_display_name 정확 → 2) slack_display_name 정확 → 3) 두 컬럼 부분일치(유일할 때만)
+                    //        → 4) Jira user search 폴백. 부분일치가 여럿이면 후보를 나열하고 중단.
+                    var resolved = resolveAssigneeByName(assigneeText);
+                    if (resolved instanceof NameResolution.Found f) {
+                        accountId = f.accountId();
+                        displayName = f.displayName();
+                    } else if (resolved instanceof NameResolution.Ambiguous a) {
+                        reply(event, String.format(
+                                ":thinking_face: *%s* 에 해당하는 사람이 여러 명이에요: %s\n정확한 이름으로 다시 지정해주세요.",
+                                assigneeText, a.candidates()));
+                        return;
                     } else {
                         accountId = jiraApiClient.findAccountId(assigneeText);
                         displayName = assigneeText;
@@ -913,6 +1435,50 @@ public class SlackEventController {
     private String issueLink(String key) {
         String base = jiraProps.baseUrl() == null ? "" : jiraProps.baseUrl().replaceAll("/+$", "");
         return base.isEmpty() ? key : base + "/browse/" + key;
+    }
+
+    // STUDY: sealed interface + record — 이름 해석의 3가지 결과(찾음/모호/없음)를 타입으로 표현.
+    //        표시명은 한국어(slackDisplayName) 우선 — 사용자가 부른 이름과 응답 표기를 맞춘다.
+    sealed interface NameResolution {
+        record Found(String accountId, String displayName) implements NameResolution {}
+        record Ambiguous(String candidates) implements NameResolution {}
+        record NotFound() implements NameResolution {}
+    }
+
+    private NameResolution resolveAssigneeByName(String name) {
+        // 1) Jira 표시명 정확 일치
+        var byJira = userMappingRepository.findByJiraDisplayName(name);
+        if (byJira.isPresent() && byJira.get().getJiraAccountId() != null) {
+            return found(byJira.get());
+        }
+        // 2) Slack 표시명 정확 일치 (한국어 이름은 대개 여기 있음)
+        var bySlack = userMappingRepository.findBySlackDisplayName(name);
+        if (bySlack.isPresent() && bySlack.get().getJiraAccountId() != null) {
+            return found(bySlack.get());
+        }
+        // 3) 두 컬럼 부분일치 — 유일할 때만 채택, 여럿이면 후보 나열
+        var partial = userMappingRepository.searchByAnyDisplayName(name).stream()
+                .filter(u -> u.getJiraAccountId() != null)
+                .toList();
+        if (partial.size() == 1) {
+            return found(partial.get(0));
+        }
+        if (partial.size() > 1) {
+            String candidates = partial.stream()
+                    .map(u -> preferredDisplayName(u))
+                    .reduce((x, y) -> x + ", " + y).orElse("");
+            return new NameResolution.Ambiguous(candidates);
+        }
+        return new NameResolution.NotFound();
+    }
+
+    private NameResolution.Found found(com.jirabot.slack.entity.UserMappingEntity u) {
+        return new NameResolution.Found(u.getJiraAccountId(), preferredDisplayName(u));
+    }
+
+    private String preferredDisplayName(com.jirabot.slack.entity.UserMappingEntity u) {
+        return u.getSlackDisplayName() != null && !u.getSlackDisplayName().isBlank()
+                ? u.getSlackDisplayName() : u.getJiraDisplayName();
     }
 
     // STUDY: Jira 전체 버그를 Notion '버그 현황' DB 로 백필. 건수가 많아 비동기로 실행하고 결과만 회신.
@@ -1023,7 +1589,7 @@ public class SlackEventController {
                 replyThread(event, ":hourglass: 일정 시간이 지난 요청이라 처리하지 않았습니다. 다시 보내주세요.");
                 return ResponseEntity.ok(Map.of("ok", true));
             }
-            String cleaned = stripMention(event.text());
+            String cleaned = stripMention(event.text(), envelope.botUserId());
             if (event.isFromHuman() && !cleaned.isBlank()) {
                 routeCommand(event, cleaned.strip());
             } else {
