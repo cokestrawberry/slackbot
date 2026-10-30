@@ -1,5 +1,6 @@
 package com.jirabot.slack.client;
 
+import com.jirabot.slack.client.dto.BugCategoryResult;
 import com.jirabot.slack.client.dto.BugResolutionSummary;
 import com.jirabot.slack.client.dto.IssueClassification;
 import com.jirabot.slack.client.dto.IssueSearchEntry;
@@ -12,12 +13,29 @@ public interface ClaudeApiClient {
 
     IssueClassification classify(String rawText, IntentResult intentHint);
 
+    /**
+     * 완료/진행 중인 PR(제목+본문)의 회고 등록용 분류 — prompts/skill-pr-import.md 전용 스킬.
+     * SP 는 호출부가 기간 기반으로 덮어쓰므로 type/title/summary 품질에 집중한다.
+     */
+    IssueClassification classifyPr(String rawText);
+
+    /**
+     * NL 이슈 조작 명령(담당자/필드 변경, 링크, 하위작업, 스프린트 이동)에서 구조화 액션 추출 —
+     * prompts/skill-issue-action.md 전용 스킬. 실패/저신뢰 시 IssueActionSpec.none()
+     * (호출부가 안내 응답으로 폴백). 실행/검증은 Java 가 담당(extract-then-execute).
+     */
+    com.jirabot.slack.client.dto.IssueActionSpec extractIssueAction(String rawText);
+
     // STUDY: Sonnet 기반 의미 검색. 사용자 질문과 이슈 목록을 Sonnet에게 전달하여 관련도 높은 이슈 키를 반환받는다.
     List<String> searchIssues(String userQuery, List<IssueSearchEntry> issues);
 
     // STUDY: 버그 완료 시 원인/해결방법 요약. Jira 설명+댓글+Slack 스레드를 입력으로 받아 {cause, fix} JSON 반환.
     BugResolutionSummary summarizeBugResolution(String issueKey, String description,
                                                 List<String> comments, List<String> threadMessages);
+
+    // STUDY: 버그 원인 카테고리 자동 분류. 제목+설명을 prompts/bug-category.md 체계로 분류해 {primary, secondaries} 반환.
+    //        실패 시 BugCategoryResult.empty(). 봇이 버그 완료 시 Notion 현황 DB의 원인분류/세부원인을 채우는 데 사용.
+    BugCategoryResult classifyBugCategory(String summary, String description);
 
     // STUDY: 한글 이슈 요약 → 영어 git 브랜치 슬러그(짧은 영문 구). 권장 브랜치명 생성에 사용.
     //        실패/타임아웃 시 빈 문자열 반환 → 호출부가 issueKey 만으로 브랜치명을 만든다.

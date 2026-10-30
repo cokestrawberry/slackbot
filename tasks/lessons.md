@@ -243,3 +243,113 @@ keychain 읽기까지 스킵해서 구독(OAuth) 인증 토큰을 못 읽는다.
 
 **How to apply**: Jira(또는 임의 SaaS) 날짜를 Instant 로 바꾸는 지점을 보면 오프셋 형식(`+0900` vs `+09:00` vs `Z`)을
 실측하고 견고 파서를 쓴다. 동기화가 채우는 컬럼은 배포 후 `SELECT count(col)` 로 null 비율을 확인.
+
+---
+
+## L14 — 자체 생성 WebClient 는 기본 256KB 버퍼: 큰 응답이 "조용히 빈 결과"가 된다 (3회 반복)
+
+**Context**: 같은 함정을 세 번 밟음 — ①jiraWebClient(JQL 대량 조회, v0.0.34) ②githubWebClient(PR 많은 repo, v0.0.43)
+③NotionApiClientImpl 자체 WebClient(100-page query, v0.0.52). 모두 `DataBufferLimitException: 262144` 인데
+HTTP 는 200 이라 에러 플래그로 안 잡히고, catch 가 빈 목록을 반환해 **데이터가 조용히 사라진 것처럼** 보였다.
+
+**Rule**:
+- WebClient 를 새로 만들면(전역 config 밖 로컬 빌더 포함) **`.codecs(c -> c.defaultCodecs().maxInMemorySize(8MB))` 를 기본으로** 넣는다.
+- "외부 API가 0건을 반환한다" 증상이면 로그에서 `DataBufferLimitException` 을 1순위로 grep.
+- 신규 외부 연동 리뷰 체크리스트에 버퍼 설정 포함.
+
+**How to apply**: `grep -rn "WebClient.builder" src/` 로 로컬 생성 지점을 찾아 maxInMemorySize 유무를 확인한다.
+
+## L15. eval 테스트는 test 프로파일의 무해화 설정을 실값으로 오버라이드해야 한다
+
+**Pattern**: 스킬 eval 첫 실행이 14초 만에 "통과처럼 보이는" 결과를 냈다 — 실제로는 test 프로파일의
+`claude.cli-path: /bin/true`(유닛테스트용 무해화) 때문에 모든 CLI 호출이 빈 출력→fallback 이었고,
+fallback 이 intent 힌트로 type 을 채워 type 정확도 0.9가 "우연히" 나왔다. intent eval 은
+`IntentProperties.cliPath()` 가 하드코딩 "claude" 라 우연히 실 CLI 를 탔던 것.
+
+**Why**: eval 은 실제 모델 품질 측정이 목적 — 무해화된 의존성 위에서 돌면 측정이 아니라 폴백 로직 테스트다.
+소요 시간이 비정상적으로 짧으면(케이스당 <1s) 실 호출이 아닌 것부터 의심한다.
+
+**How to apply**:
+- 실 CLI eval 테스트에는 `@SpringBootTest(properties = {"claude.cli-path=claude", "claude.timeout-seconds=20"})` 오버라이드.
+- 새 `-D<x>.eval` 프로퍼티는 build.gradle test 블록에 `systemProperty` 포워딩을 반드시 추가 (없으면 워커 JVM 에 안 보여 스킵).
+- eval 결과 검토 시 소요 시간(케이스 수 × 모델 지연)이 합리적인지 먼저 확인.
+
+## L16. 서비스 유닛테스트 통과 ≠ 라우팅 통과 — 상위 라우팅 스테이지가 기능을 가로챌 수 있다
+
+**Pattern**: v0.0.53 "X epic 아래에 task 생성"(resolveParentEpic)은 서비스 레벨 테스트로 검증하고 배포했지만,
+실제 Slack 흐름에선 라우팅 1.5차 `containsEpicKeyword`("에픽" 포함 → 에픽 생성)가 **먼저** 가로채
+register_epic 으로 강제됐다 — 하위 서비스 로직은 한 번도 실행되지 못했다. v0.0.64에서야 발견.
+
+**Why**: routeCommand 는 우선순위 스테이지 체인이라, 새 기능이 어느 스테이지에서 처리되는지는
+서비스 테스트가 아니라 **컨트롤러(MockMvc) 레벨의 전체-메시지 라우팅 테스트**만이 보장한다.
+
+**How to apply**:
+- 새 NL 기능의 DoD: (1) 대표 실사용 문장으로 MockMvc 라우팅 테스트(가로채는 스테이지가 없는지),
+  (2) 배포 후 실 Slack 1회 왕복 확인 (L10의 webhook E2E 원칙을 NL 라우팅에도 적용).
+- 키워드 트리거(에픽/하위작업 등)를 추가·수정할 때 기존 NL 기능 문장들이 여전히 의도한 스테이지로
+  가는지 회귀 테스트를 함께 확인.
+
+## L17. unattended-upgrades 가 JDK 를 교체하면 실행 중인 JVM 은 서브프로세스를 못 만든다
+
+**Pattern**: 8/24 기동한 봇(JDK 17.0.19)이 8/27 06:02 unattended-upgrades 의 openjdk 17.0.20 교체 후
+모든 `claude` CLI 호출에서 즉사: "Failed to exec spawn helper … Incorrect Java version: 17.0.19 vs
+jspawnhelper 17.0.20". 재시도 3회도 같은 이유로 전멸 → intent=unknown → "이해하지 못했어요".
+사용자 입장에선 "티켓 생성이 안 된다"로만 보임.
+
+**Why**: JVM 은 fork/exec 을 디스크의 jspawnhelper 바이너리에 위임하는데, in-place JDK 업그레이드로
+버전이 어긋나면 스폰 자체가 거부된다. HTTP 서빙 등 스폰이 필요 없는 기능은 멀쩡해서 health UP 인데
+LLM 기능만 죽는 반쪽 장애가 된다.
+
+**How to apply**:
+- 증상 시그니처: 로그에 "Failed to exec spawn helper" / "Incorrect Java version" → **봇 재시작이 해법**
+  (새 JVM 이 새 JDK 로 뜨면 정합).
+- "분류가 전부 unknown/즉사(수 ms)" 패턴이면 모델/프롬프트가 아니라 스폰 실패부터 의심 (L15 의 소요시간
+  휴리스틱과 동일 계열).
+- 근본 대응 후보: unattended-upgrades 후 자동 재시작 훅, 또는 openjdk 를 apt-mark hold 하고 수동 업그레이드.
+
+## L18. 유닛테스트 통과 ≠ 런타임 헤더/라우팅 — Security 헤더라이터와 {id} 매핑은 라이브로 확인하라
+
+v0.0.75 에서 유닛테스트 495개가 전부 green 인 상태로 라이브 검증에서 버그 2개가 나왔다:
+1. **X-Frame-Options 라이터는 컨트롤러 헤더를 무조건 덮어쓴다.** Cache-Control 라이터는
+   containsHeader 를 체크해 skip 하지만 XFO 라이터는 안 한다 — Spring Security 헤더라이터들의
+   동작이 라이터마다 다르다. standalone MockMvc 테스트는 Security 필터가 없어 이걸 절대 못 잡는다.
+   해결: SecurityConfig 에서 전역 `frameOptions.sameOrigin()`.
+2. **`@GetMapping("/x/{id}")` 는 정적 파일명도 삼킨다.** `/artifacts/review/{id}` 가
+   `index.html`/`review.js` 까지 매칭해 long 변환 400 — 같은 프리픽스에 정적 리소스를 둘 거면
+   `{id:\d+}` 정규식이 필수다.
+
+**규칙**: 헤더/라우팅이 걸린 변경은 배포 후 curl 로 실제 응답 헤더와 정적 경로를 반드시 찍어본다
+(L16 의 확장 — "코드 계층의 테스트"는 컨테이너/필터 계층의 동작을 증명하지 못한다).
+
+## L19. 대시보드 검증은 "사용자가 실제로 들어오는 경로" 로 — localhost·정답 URL 만으로는 못 잡는다
+
+v0.0.84: 다른 사람들에게 대시보드가 깨지거나 막혀 보였는데, 나는 몇 주간 매번 `localhost:8080/dashboard/`
+(끝 `/` 포함) 또는 ngrok 경고 생략 헤더로만 검증해서 전혀 못 봤다. 실제 원인은 전부 "진입 경로" 쪽:
+1. `/dashboard` 를 **forward** 하면 주소창이 그대로라 상대경로 `style.css`·`app.js` 가 `/style.css` 로 풀려 404.
+   디렉토리형 페이지는 반드시 **redirect** 로 trailing slash 를 붙인다 (아티팩트 뷰어 301 과 같은 원리).
+2. 도메인만 입력하면 Go 기본 `404 page not found` → 막힌 것처럼 보임.
+3. 프록시 뒤 Spring 의 `sendRedirect` 는 Tomcat 이 **요청 scheme(http) 기준 절대 URL** 로 바꾼다 →
+   https 터널 사용자에게 `http://` 로 redirect. `server.tomcat.use-relative-redirects: true` 로 해결.
+   (ResponseEntity.location(URI) 로 직접 넣은 Location 은 상대경로 그대로라 영향 없었음 — 경로마다 다르다.)
+
+**규칙**: UI·인증·라우팅 변경 후에는 **터널 URL + 새 브라우저(쿠키 없음) + 사람이 칠 법한 주소들**
+(`/`, `/dashboard`, `/dashboard/`)로 확인한다. 장애 제보가 오면 추측 전에 ngrok inspector
+(`127.0.0.1:4040/api/requests/http`)에서 실제 받은 상태코드부터 본다 — 이번 원인 3개 중 2개가 거기서 바로 보였다.
+
+## L20. 내 headless 검증 설정이 실사용 조건을 가렸다 — 경고 생략 헤더·자동 인증·타사 쿠키
+
+v0.0.88: 리뷰 페이지 iframe 이 150px(기본 높이)에 멈춰 댓글이 안 됐는데, 내 E2E 는 몇 주간 매번 통과했다.
+내 puppeteer 는 `setExtraHTTPHeaders({'ngrok-skip-browser-warning'})` 로 **모든 요청**(iframe 하위 요청 포함)에
+ngrok 경고 생략 헤더를 붙이고 있었다. 실사용자는 [Visit Site] 로 받은 **쿠키**로 통과하는데, 보안 격리
+(opaque origin) 문서 안의 요청은 "타사 요청"이라 **시크릿 창(타사 쿠키 차단 기본)** 에서는 그 쿠키가 빠지고
+ngrok 이 스크립트 대신 경고 페이지를 돌려줬다 — 우리 서버까지 오지 않아 ngrok inspector 에도 안 남는다.
+해결: 에이전트를 외부 src 대신 HTML 에 **인라인** 주입 (요청 자체를 없앰).
+
+**규칙**:
+- 실사용 재현은 **경고 생략 헤더 없이**, ngrok 경고 → Visit Site 쿠키 흐름 그대로. 그리고 한 번은
+  `--test-third-party-cookie-phaseout`(타사 쿠키 차단 = 시크릿 창 기본)으로도 돌린다.
+- "요청이 서버 기록에 없음" = 브라우저나 ngrok 엣지에서 막힌 것. 서버 코드부터 의심하지 말 것.
+- 보안 격리 문서에서 나가는 요청(스크립트·자산)은 쿠키·인증·광고차단에 모두 취약 — 가능하면 인라인.
+- (v0.0.89 추가) 우리 JS 가 보내는 fetch 에는 `ngrok-skip-browser-warning` 헤더를 항상 붙인다 — 쿠키가 없으면
+  ngrok 이 **200 + HTML** 을 줘서 상태코드 검사로는 못 거르고 `res.json()` 에서 터진다(Safari: "The string did not
+  match the expected pattern."). 재현은 "문서·스크립트는 통과, fetch 만 쿠키 없음" 조건으로.

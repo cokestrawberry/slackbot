@@ -27,7 +27,7 @@ class ClaudeApiClientImplTest {
     @BeforeEach
     void setUp() {
         runner = mock(ProcessRunner.class);
-        ClaudeProperties props = new ClaudeProperties("claude", "claude-sonnet-4-6", "claude-haiku-4-5", 5, "plan", 1);
+        ClaudeProperties props = new ClaudeProperties("claude", "claude-sonnet-4-6", "claude-haiku-4-5", 5, "plan", 1, true);
         client = new ClaudeApiClientImpl(runner, props, new ObjectMapper());
     }
 
@@ -64,6 +64,61 @@ class ClaudeApiClientImplTest {
         assertThat(result.type()).isEqualTo(IssueClassification.IssueType.FEATURE);
         assertThat(result.storyPoint()).isEqualTo(3);
         assertThat(result.title()).isEqualTo("TT");
+    }
+
+    @Test
+    void transientFailure_thenSuccess_retriesOnce() {
+        String inner = "{\"type\":\"BUG\",\"storyPoint\":2,\"title\":\"T\",\"summary\":\"S\"}";
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(1, "", "", false))          // 1차: exit 1
+                .thenReturn(new ProcessRunner.Result(0, envelope(inner, false), "", false)); // 2차: 성공
+
+        IssueClassification result = client.classify("로그인 500 에러");
+
+        assertThat(result.type()).isEqualTo(IssueClassification.IssueType.BUG);   // 재시도로 정상 분류
+        verify(runner, org.mockito.Mockito.times(2))
+                .run(any(List.class), anyString(), any(Duration.class));
+    }
+
+    @Test
+    void timeout_isRetried_upToMaxAttempts() {
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(-1, "", "", true));   // 매번 타임아웃
+
+        client.classify("오래 걸리는 입력");
+
+        // 신뢰성 우선: 타임아웃도 재시도 → 최대 MAX_ATTEMPTS 회 호출.
+        verify(runner, org.mockito.Mockito.times(ClaudeApiClientImpl.MAX_ATTEMPTS))
+                .run(any(List.class), anyString(), any(Duration.class));
+    }
+
+    @Test
+    void twoFailures_thenSuccess_recoversWithinMaxAttempts() {
+        String inner = "{\"type\":\"BUG\",\"storyPoint\":2,\"title\":\"T\",\"summary\":\"S\"}";
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(1, "", "", false))            // 1차 실패
+                .thenReturn(new ProcessRunner.Result(-1, "", "", true))            // 2차 타임아웃
+                .thenReturn(new ProcessRunner.Result(0, envelope(inner, false), "", false)); // 3차 성공
+
+        IssueClassification result = client.classify("로그인 500 에러");
+
+        assertThat(result.type()).isEqualTo(IssueClassification.IssueType.BUG);
+        verify(runner, org.mockito.Mockito.times(3))
+                .run(any(List.class), anyString(), any(Duration.class));
+    }
+
+    @Test
+    void allAttemptsFail_withRegisterBugHint_fallbackTypeIsBug() {
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(1, "", "", false));   // 매번 실패
+        var hint = new com.jirabot.slack.client.dto.IntentResult(
+                "register_bug", 0.9, java.util.Map.of(), "CPU 저조 티켓 만들어줘");
+
+        IssueClassification result = client.classify("CPU 저조 티켓 만들어줘", hint);
+
+        // 의도(register_bug) 기반으로 OTHER 대신 BUG, 제목엔 명령어구 없음.
+        assertThat(result.type()).isEqualTo(IssueClassification.IssueType.BUG);
+        assertThat(result.title()).doesNotContain("만들어줘");
     }
 
     @Test
@@ -338,5 +393,126 @@ class ClaudeApiClientImplTest {
 
         assertThat(stdin).startsWith("[사용자 질문]");
         assertThat(stdin).contains("[이슈 목록]");
+    }
+
+    // ==================== 의도별 스킬 선택 (v0.0.60) ====================
+    // 주의: 테스트는 repo 루트에서 실행돼 prompts/*.md 가 실재한다 — 파일 존재 전제의 선택 로직 검증.
+
+    private static com.jirabot.slack.client.dto.IntentResult hint(String intent) {
+        return new com.jirabot.slack.client.dto.IntentResult(intent, 0.9, java.util.Map.of(), "t");
+    }
+
+    @Test
+    void classifierPromptFileFor_selectsPerIntentSkill() {
+        assertThat(client.classifierPromptFileFor(hint("register_bug")))
+                .isEqualTo(ClaudeApiClientImpl.BUG_SKILL_PROMPT_FILE);
+        assertThat(client.classifierPromptFileFor(hint("register_story")))
+                .isEqualTo(ClaudeApiClientImpl.STORY_SKILL_PROMPT_FILE);
+        // 에픽/무힌트 → 공용 classifier
+        assertThat(client.classifierPromptFileFor(hint("register_epic")))
+                .isEqualTo(ClaudeApiClientImpl.CLASSIFIER_PROMPT_FILE);
+        assertThat(client.classifierPromptFileFor(null))
+                .isEqualTo(ClaudeApiClientImpl.CLASSIFIER_PROMPT_FILE);
+    }
+
+    @Test
+    void classify_bugIntent_usesBugSkillFileInCommand() {
+        String inner = "{\"type\":\"BUG\",\"storyPoint\":2,\"title\":\"T\",\"summary\":\"S\"}";
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(0, envelope(inner, false), "", false));
+
+        client.classify("로그인 500 에러", hint("register_bug"));
+
+        org.mockito.ArgumentCaptor<List<String>> cmd = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(runner).run(cmd.capture(), anyString(), any(Duration.class));
+        int i = cmd.getValue().indexOf("--system-prompt-file");
+        assertThat(i).isGreaterThanOrEqualTo(0);
+        assertThat(cmd.getValue().get(i + 1)).isEqualTo(ClaudeApiClientImpl.BUG_SKILL_PROMPT_FILE);
+    }
+
+    @Test
+    void classifyPr_usesPrSkillFile_andParses() {
+        String inner = "{\"type\":\"BUG\",\"storyPoint\":2,\"title\":\"NPE 수정\",\"summary\":\"요약\"}";
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(0, envelope(inner, false), "", false));
+
+        IssueClassification result = client.classifyPr("PR 제목: fix NPE\n\n본문");
+
+        assertThat(result.title()).isEqualTo("NPE 수정");
+        org.mockito.ArgumentCaptor<List<String>> cmd = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(runner).run(cmd.capture(), anyString(), any(Duration.class));
+        int i = cmd.getValue().indexOf("--system-prompt-file");
+        assertThat(cmd.getValue().get(i + 1)).isEqualTo(ClaudeApiClientImpl.PR_IMPORT_PROMPT_FILE);
+    }
+
+    @Test
+    void parseableButMissingFields_isRejectedAndRetried() {
+        // JSON 으로는 유효하지만 필수 필드가 빠진 응답 → 통과시키면 "null" 제목 티켓 발생(스킬 eval 실측).
+        String bad = "{\"foo\":\"bar\"}";
+        String good = "{\"type\":\"BUG\",\"storyPoint\":2,\"title\":\"T\",\"summary\":\"S\"}";
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(0, envelope(bad, false), "", false))
+                .thenReturn(new ProcessRunner.Result(0, envelope(good, false), "", false));
+
+        IssueClassification result = client.classify("로그인 500 에러");
+
+        assertThat(result.title()).isEqualTo("T");
+        verify(runner, org.mockito.Mockito.times(2)).run(any(List.class), anyString(), any(Duration.class));
+    }
+
+    @Test
+    void invalidStoryPointScale_isRejectedAndRetried() {
+        // SP=13 처럼 팀 스케일 밖 값도 거부 → 재시도
+        String bad = "{\"type\":\"BUG\",\"storyPoint\":13,\"title\":\"T\",\"summary\":\"S\"}";
+        String good = "{\"type\":\"BUG\",\"storyPoint\":8,\"title\":\"T\",\"summary\":\"S\"}";
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(0, envelope(bad, false), "", false))
+                .thenReturn(new ProcessRunner.Result(0, envelope(good, false), "", false));
+
+        IssueClassification result = client.classify("큰 작업");
+
+        assertThat(result.storyPoint()).isEqualTo(8);
+    }
+
+    @Test
+    void extractIssueAction_parsesSpecAndUsesActionSkillFile() {
+        String inner = "{\"action\":\"assign\",\"issueKey\":\"es2-1190\",\"assignee\":\"최아록\",\"confidence\":0.97}";
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(0, envelope(inner, false), "", false));
+
+        var spec = client.extractIssueAction("ES2-1190 담당자를 최아록으로");
+
+        assertThat(spec.action()).isEqualTo("assign");
+        assertThat(spec.issueKey()).isEqualTo("ES2-1190"); // 정규화: 대문자
+        assertThat(spec.assignee()).isEqualTo("최아록");
+        org.mockito.ArgumentCaptor<List<String>> cmd = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(runner).run(cmd.capture(), anyString(), any(Duration.class));
+        int i = cmd.getValue().indexOf("--system-prompt-file");
+        assertThat(cmd.getValue().get(i + 1)).isEqualTo(ClaudeApiClientImpl.ISSUE_ACTION_PROMPT_FILE);
+    }
+
+    @Test
+    void extractIssueAction_failureTwice_returnsNone() {
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(1, "", "err", false));
+
+        var spec = client.extractIssueAction("ES2-1 담당자를 홍길동으로");
+
+        assertThat(spec.action()).isEqualTo("none");
+        assertThat(spec.isActionable()).isFalse();
+        verify(runner, org.mockito.Mockito.times(2)).run(any(List.class), anyString(), any(Duration.class));
+    }
+
+    @Test
+    void classifyPr_allAttemptsFail_fallsBackToTitleFromText() {
+        when(runner.run(any(), anyString(), any(Duration.class)))
+                .thenReturn(new ProcessRunner.Result(1, "", "err", false));
+
+        IssueClassification result = client.classifyPr("PR 제목: feat something");
+
+        assertThat(result).isNotNull();
+        assertThat(result.type()).isEqualTo(IssueClassification.IssueType.OTHER);
+        verify(runner, org.mockito.Mockito.times(ClaudeApiClientImpl.MAX_ATTEMPTS))
+                .run(any(List.class), anyString(), any(Duration.class));
     }
 }

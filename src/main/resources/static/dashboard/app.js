@@ -35,6 +35,16 @@ window.addEventListener('unhandledrejection', (e) =>
     firstFrame(e.reason)));
 
 const API = '/api/dashboard';
+// STUDY: 주소창에 자격증명이 포함된 채(https://id:pw@host/...) 열리면 상대경로 fetch 가
+// "Request cannot be constructed from a URL that includes credentials" 로 거부된다 (v0.0.68 실사고).
+// location.origin 은 자격증명을 포함하지 않으므로 이를 기준으로 절대 URL 을 만들어 우회한다.
+// Basic Auth 는 페이지 로드 때 브라우저가 realm 에 캐시하므로 이후 요청에 자동으로 실린다.
+// STUDY: ngrok 무료 플랜은 경고 통과 쿠키가 없는 요청에 200 + 경고 페이지 HTML 을 돌려준다(쿠키 만료·
+// Safari 쿠키 정책·시크릿 창 등). 그러면 res.json() 이 Safari 에서 "The string did not match the expected
+// pattern." 으로 터진다(v0.0.89 실사고). 스크립트가 보내는 요청에는 ngrok 공식 우회 헤더를 붙여 쿠키와 무관하게 통과.
+const NGROK_SKIP = { 'ngrok-skip-browser-warning': '1' };
+const apiFetch = (path, opts = {}) => fetch(new URL(path, location.origin),
+  { ...opts, headers: { ...NGROK_SKIP, ...(opts.headers || {}) } });
 const charts = {};   // canvasId → Chart 인스턴스 (탭 재방문 시 destroy 후 재생성)
 const loaded = {};   // 탭별 1회 로드 플래그 (새로고침 버튼/탭 재클릭 시 갱신)
 
@@ -60,8 +70,12 @@ const fmtDay = (d) => d ? d.slice(5).replace('-', '/') : '';
 const esc = (s) => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 async function get(path) {
-  const res = await fetch(API + path);
+  const res = await apiFetch(API + path);
   if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`);
+  // JSON 이 아닌 응답(중간 프록시의 HTML 페이지 등)이면 Safari 의 알아보기 힘든 오류 대신 원인을 알려준다
+  if (!(res.headers.get('content-type') || '').includes('json')) {
+    throw new Error(`${path} → 데이터 대신 다른 페이지가 응답했습니다. 새로고침해 주세요 (ngrok 경고 페이지일 수 있음)`);
+  }
   return res.json();
 }
 
@@ -314,7 +328,7 @@ function renderIssues() {
 }
 
 async function loadUsers() {
-  const res = await fetch('/api/user-mappings');
+  const res = await apiFetch('/api/user-mappings');
   const d = await res.json();
   rows('table-users', d.map(u =>
     `<tr><td>${esc(u.slackDisplayName ?? '')} <span class="muted">${esc(u.slackUserId)}</span></td>` +
@@ -326,7 +340,7 @@ async function loadUsers() {
     || '<tr><td colspan="6" class="muted">등록된 사용자 없음</td></tr>');
 
   document.querySelectorAll('#table-users .toggle').forEach(b => b.onclick = async () => {
-    await fetch('/api/user-mappings/' + b.dataset.user, {
+    await apiFetch('/api/user-mappings/' + b.dataset.user, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ [b.dataset.field]: b.dataset.val === 'true' })
     });
@@ -334,13 +348,13 @@ async function loadUsers() {
   });
   document.querySelectorAll('#table-users [data-del]').forEach(b => b.onclick = async () => {
     if (!confirm(b.dataset.del + ' 매핑을 삭제할까요?')) return;
-    await fetch('/api/user-mappings/' + b.dataset.del, { method: 'DELETE' });
+    await apiFetch('/api/user-mappings/' + b.dataset.del, { method: 'DELETE' });
     loadUsers();
   });
 }
 
 async function loadFeatures() {
-  const res = await fetch('/api/feature-requests');
+  const res = await apiFetch('/api/feature-requests');
   const d = await res.json();
   rows('table-features', d.map(f =>
     `<tr${f.done ? ' style="opacity:.55"' : ''}>` +
@@ -354,7 +368,7 @@ async function loadFeatures() {
     || '<tr><td colspan="7" class="muted">아직 요청이 없습니다 — 첫 기능을 제안해보세요!</td></tr>');
 
   document.querySelectorAll('#table-features [data-fr]').forEach(b => b.onclick = async () => {
-    await fetch('/api/feature-requests/' + b.dataset.fr, {
+    await apiFetch('/api/feature-requests/' + b.dataset.fr, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ done: b.dataset.done === 'true' })
     });
@@ -369,7 +383,7 @@ async function addFeature() {
   const btn = document.getElementById('btn-fr-add');
   btn.disabled = true;
   try {
-    const res = await fetch('/api/feature-requests', {
+    const res = await apiFetch('/api/feature-requests', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         title,
@@ -391,10 +405,65 @@ async function addFeature() {
   }
 }
 
+/* ---------- 버그 지식베이스 ---------- */
+let kbData = [];
+
+async function loadKnowledge() {
+  kbData = await get('/bug-knowledge');
+  fillSelect('kb-category', [...new Set(kbData.map(r => r.category).filter(Boolean))].sort());
+  renderKnowledge();
+}
+
+function renderKnowledge() {
+  const q = document.getElementById('kb-q').value.trim().toLowerCase();
+  const cat = document.getElementById('kb-category').value;
+  const st = document.getElementById('kb-status').value;
+  const list = kbData
+    .filter(r => !cat || r.category === cat)
+    .filter(r => !st || r.status === st)
+    .filter(r => !q || [r.key, r.title, r.rootCause, r.fix].some(
+        v => (v || '').toLowerCase().includes(q)));
+
+  // 카테고리 분포 카드 (현재 필터 반영)
+  const byCat = {};
+  list.forEach(r => { if (r.category) byCat[r.category] = (byCat[r.category] || 0) + 1; });
+  const top = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  document.getElementById('kb-cards').innerHTML =
+    card('표시 중', list.length === kbData.length ? list.length : `${list.length} <span class="muted">/ ${kbData.length}</span>`) +
+    top.map(([c, n]) => card(c, n)).join('');
+
+  rows('table-knowledge', list.map(r =>
+    `<tr><td>${r.jiraUrl ? `<a href="${r.jiraUrl}" target="_blank">${esc(r.key)}</a>` : esc(r.key)}</td>` +
+    `<td>${esc(r.title)}</td>` +
+    `<td>${r.category ? `<span class="badge progress">${esc(r.category)}</span>` : '-'}</td>` +
+    `<td class="muted">${r.subcategories.map(esc).join(', ')}</td>` +
+    `<td style="max-width:260px">${esc(r.rootCause)}</td>` +
+    `<td style="max-width:260px">${esc(r.fix)}</td>` +
+    `<td>${r.prLinks.map(p => `<a href="${p.url}" target="_blank">${esc(p.label)}</a>`).join('<br>') || '-'}</td>` +
+    `<td class="muted">${esc(r.resolvedDate || '-')}</td></tr>`).join('')
+    || '<tr><td colspan="8" class="muted">결과 없음</td></tr>');
+}
+
+/* ---------- GitHub ↔ Jira 매핑 ---------- */
+async function loadGhMappings() {
+  const res = await apiFetch('/api/github-mappings');
+  const d = await res.json();
+  rows('table-gh', d.map(m =>
+    `<tr><td>${esc(m.githubLogin)}</td><td>${esc(m.jiraDisplayName)}</td>` +
+    `<td class="muted">${m.jiraAccountId ? '✓' : '-'}</td>` +
+    `<td><button class="btn danger" data-ghdel="${esc(m.githubLogin)}">삭제</button></td></tr>`).join('')
+    || '<tr><td colspan="4" class="muted">매핑 없음</td></tr>');
+  document.querySelectorAll('#table-gh [data-ghdel]').forEach(b => b.onclick = async () => {
+    if (!confirm(b.dataset.ghdel + ' 매핑을 삭제할까요?')) return;
+    await apiFetch('/api/github-mappings/' + b.dataset.ghdel, { method: 'DELETE' });
+    loadGhMappings();
+  });
+}
+
 async function loadBot() {
   let health = '🔴 DOWN';
   try {
-    const h = await (await fetch('/actuator/health')).json();
+    const h = await (await apiFetch('/actuator/health')).json();
     if (h.status === 'UP') health = '🟢 UP';
   } catch (e) { /* keep DOWN */ }
   const s = await get('/summary');
@@ -427,7 +496,8 @@ async function loadBot() {
 
 const LOADERS = { overview: loadOverview, sprint: loadSprint, trends: loadTrends,
   workload: loadWorkload, bugs: loadBugs, prs: loadPrs, issues: loadIssues,
-  users: loadUsers, bot: loadBot, features: loadFeatures };
+  users: async () => { await loadUsers(); await loadGhMappings(); },
+  knowledge: loadKnowledge, bot: loadBot, features: loadFeatures, members: loadMembers };
 
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -435,7 +505,312 @@ function showTab(name) {
   LOADERS[name]().catch(reportErr);
 }
 
-document.querySelectorAll('.tab').forEach(t => t.onclick = () => showTab(t.dataset.tab));
+// ===== 아티팩트 갤러리 (v0.0.71) =====
+// 카드 미리보기는 sandbox iframe (allow-scripts만 — same-origin 금지: 업로드 HTML의 XSS 방어)
+// 주제 폴더 (v0.0.86) — 목록은 전부 받아와 브라우저에서 폴더별로 거른다 (추가 요청 없음).
+// 선택 값: 'all'(전체) | 'none'(미분류) | 폴더 id 문자열. 마지막 선택은 브라우저에 기억.
+let artList = [], artFolders = [], meIsAdmin = false;
+let artSelected = (() => { try { return localStorage.getItem('art_folder') || 'all'; } catch (_) { return 'all'; } })();
+
+async function loadArtifacts() {
+  const [listRes, folderRes] = await Promise.all([apiFetch('/api/artifacts'), apiFetch('/api/artifact-folders')]);
+  artList = await listRes.json();
+  artFolders = folderRes.ok ? await folderRes.json() : [];
+  // 선택해 둔 폴더가 지워졌으면 전체로
+  if (!['all', 'none'].includes(artSelected) && !artFolders.some(f => String(f.id) === artSelected)) {
+    selectArtFolder('all', false);
+  }
+  renderArtFolders();
+  renderArtifacts();
+}
+
+function selectArtFolder(key, render = true) {
+  artSelected = String(key);
+  try { localStorage.setItem('art_folder', artSelected); } catch (_) {}
+  if (render) { renderArtFolders(); renderArtifacts(); }
+}
+
+function folderName(id) {
+  const f = artFolders.find(f => String(f.id) === String(id));
+  return f ? f.name : null;
+}
+
+function renderArtFolders() {
+  const count = key => key === 'all' ? artList.length
+    : key === 'none' ? artList.filter(a => a.folderId == null).length
+    : artList.filter(a => String(a.folderId) === String(key)).length;
+  const item = (key, icon, name, actions) =>
+    `<div class="art-folder${artSelected === String(key) ? ' active' : ''}" data-folder="${key}">
+       <span>${icon}</span><span class="f-name" title="${esc(name)}">${esc(name)}</span>
+       <span class="f-count">${count(key)}</span>${actions || ''}</div>`;
+  const box = document.getElementById('art-folders');
+  box.innerHTML = item('all', '📚', '전체') + item('none', '📥', '미분류') + '<hr>'
+    + artFolders.map(f => item(f.id, '📁', f.name,
+        `<button class="f-act" data-f-rename="${f.id}" title="이름 변경">✏️</button>`
+        + (meIsAdmin ? `<button class="f-act" data-f-del="${f.id}" title="삭제 (관리자)">🗑</button>` : ''))).join('')
+    + '<button id="art-folder-add" class="btn art-folder-add">+ 새 폴더</button>';
+
+  box.querySelectorAll('.art-folder').forEach(el => {
+    el.onclick = () => selectArtFolder(el.dataset.folder);
+    // 카드 드롭 대상 — '전체'는 위치가 아니므로 제외
+    if (el.dataset.folder === 'all') return;
+    el.ondragover = e => { e.preventDefault(); el.classList.add('drop-target'); };
+    el.ondragleave = () => el.classList.remove('drop-target');
+    el.ondrop = e => {
+      e.preventDefault(); el.classList.remove('drop-target');
+      const id = e.dataTransfer.getData('text/plain');
+      if (id) moveArtifact(id, el.dataset.folder === 'none' ? null : Number(el.dataset.folder));
+    };
+  });
+  box.querySelectorAll('[data-f-rename]').forEach(b => b.onclick = async e => {
+    e.stopPropagation();
+    const name = prompt('새 폴더 이름', folderName(b.dataset.fRename) || '');
+    if (!name || !name.trim()) return;
+    await folderRequest('/api/artifact-folders/' + b.dataset.fRename, 'PATCH', { name });
+  });
+  box.querySelectorAll('[data-f-del]').forEach(b => b.onclick = async e => {
+    e.stopPropagation();
+    const n = artList.filter(a => String(a.folderId) === b.dataset.fDel).length;
+    if (!confirm(`"${folderName(b.dataset.fDel)}" 폴더를 삭제할까요?\n안의 아티팩트 ${n}개는 미분류로 옮겨집니다.`)) return;
+    await folderRequest('/api/artifact-folders/' + b.dataset.fDel, 'DELETE');
+  });
+  document.getElementById('art-folder-add').onclick = async () => {
+    const name = prompt('새 폴더 이름 (예: 설계, 온보딩)');
+    if (!name || !name.trim()) return;
+    const created = await folderRequest('/api/artifact-folders', 'POST', { name });
+    if (created && created.id) selectArtFolder(created.id);
+  };
+
+  // 업로드 대상 안내 — 특정 폴더를 보고 있으면 그 폴더로 올라간다
+  const target = document.getElementById('art-target');
+  const fname = folderName(artSelected);
+  target.textContent = fname ? `→ 📁 ${fname} 에 올라갑니다` : '';
+}
+
+// 폴더 API 공통 — 실패하면 서버의 한글 메시지를 보여준다
+async function folderRequest(url, method, body) {
+  const res = await apiFetch(url, body ? {
+    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  } : { method });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) { alert(d.error || (res.status === 403 ? '폴더 삭제는 관리자만 할 수 있습니다.' : '실패 (HTTP ' + res.status + ')')); return null; }
+  await loadArtifacts();
+  return d;
+}
+
+async function moveArtifact(id, folderId) {
+  const res = await apiFetch(`/api/artifacts/${id}/folder`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folderId })
+  });
+  if (!res.ok) { alert('옮기기 실패 (HTTP ' + res.status + ')'); return; }
+  await loadArtifacts();
+}
+
+function renderArtifacts() {
+  const grid = document.getElementById('art-grid');
+  const list = artSelected === 'all' ? artList
+    : artSelected === 'none' ? artList.filter(a => a.folderId == null)
+    : artList.filter(a => String(a.folderId) === artSelected);
+  if (!list.length) {
+    grid.innerHTML = artList.length
+      ? '<p class="muted">이 폴더는 비어 있습니다. 다른 폴더의 카드를 왼쪽 폴더로 끌어다 놓거나 [📁 이동]으로 옮겨보세요.</p>'
+      : '<p class="muted">아직 아티팩트가 없습니다. 위에서 첫 HTML을 올려보세요.</p>';
+    return;
+  }
+  // 카드는 미리보기·제목·정보만 — 나머지 동작은 ⋯ 메뉴로 (v0.0.87). 댓글은 카드 클릭 → 리뷰 페이지.
+  grid.innerHTML = list.map(a => `
+    <div class="art-card" data-id="${a.id}" draggable="true">
+      <div class="art-preview">
+        <iframe src="/artifacts/view/${a.id}/" sandbox="allow-scripts" loading="lazy" scrolling="no" tabindex="-1"></iframe>
+      </div>
+      <div class="art-meta">
+        <div class="art-title-row">
+          <div class="art-title" title="${esc(a.title)}">${esc(a.title)}</div>
+          <button class="art-more" data-more="${a.id}" title="더보기">⋯</button>
+        </div>
+        <div class="art-sub muted">${fmtDate(a.createdAt)}${a.author ? ' · ' + esc(a.author) : ''} · ${(a.sizeBytes/1024).toFixed(0)}KB${a.assetCount ? ' · 파일 ' + a.assetCount + '개' : ''}</div>
+      </div>
+    </div>`).join('');
+  // 리뷰(댓글 포함)가 기본 진입점 (v0.0.76) — 순수 뷰어는 리뷰 페이지 상단 [원본 보기]로.
+  grid.querySelectorAll('.art-card .art-preview, .art-card .art-title').forEach(el => {
+    el.onclick = () => window.open('/artifacts/review/' + el.closest('.art-card').dataset.id, '_blank');
+  });
+  grid.querySelectorAll('.art-more').forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    openArtMenu(b, artList.find(a => String(a.id) === b.dataset.more));
+  });
+  // 폴더 이동 — 카드를 왼쪽 폴더로 드래그 앤 드롭
+  grid.querySelectorAll('.art-card').forEach(card => {
+    card.ondragstart = e => { e.dataTransfer.setData('text/plain', card.dataset.id); card.classList.add('dragging'); };
+    card.ondragend = () => card.classList.remove('dragging');
+  });
+}
+
+// ⋯ 메뉴 (v0.0.87) — 링크 복사 / 내용 수정 / 폴더 이동 / 삭제. 화면에 하나만 띄우고, 바깥 클릭·Esc 로 닫힌다.
+function closeArtMenu() {
+  const m = document.getElementById('art-menu');
+  if (m) m.remove();
+}
+function openArtMenu(btn, a) {
+  const wasOpenForSame = document.getElementById('art-menu')?.dataset.for === String(a.id);
+  closeArtMenu();
+  if (wasOpenForSame) return;   // 같은 ⋯ 를 다시 누르면 닫기만
+  const folderItems = [{ id: null, name: '미분류', icon: '📥' }]
+    .concat(artFolders.map(f => ({ id: f.id, name: f.name, icon: '📁' })))
+    .map(f => {
+      const here = (a.folderId == null && f.id == null) || String(a.folderId) === String(f.id);
+      return `<button class="art-menu-item sub" data-move-to="${f.id ?? ''}"${here ? ' disabled' : ''}>`
+        + `${f.icon} ${esc(f.name)}${here ? ' ✓' : ''}</button>`;
+    }).join('');
+  const m = document.createElement('div');
+  m.id = 'art-menu'; m.className = 'art-menu'; m.dataset.for = a.id;
+  m.innerHTML = `<button class="art-menu-item" data-act="copy">🔗 링크 복사</button>`
+    + `<button class="art-menu-item" data-act="edit">✏️ 내용 수정</button>`
+    + `<div class="art-menu-label">📁 폴더 이동</div>${folderItems}`
+    + `<button class="art-menu-item danger" data-act="del">🗑 삭제</button>`;
+  document.body.appendChild(m);
+  // 버튼 아래(화면 아래로 넘치면 위)에 띄운다
+  const r = btn.getBoundingClientRect();
+  const top = (r.bottom + m.offsetHeight + 8 > window.innerHeight) ? r.top - m.offsetHeight - 4 : r.bottom + 4;
+  m.style.top = Math.max(8, top) + 'px';
+  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, window.innerWidth - m.offsetWidth - 8)) + 'px';
+
+  m.onclick = async e => {
+    e.stopPropagation();
+    const item = e.target.closest('.art-menu-item');
+    if (!item || item.disabled) return;
+    if (item.dataset.act === 'copy') {
+      await navigator.clipboard.writeText(location.origin + '/artifacts/review/' + a.id);
+      item.textContent = '✅ 복사됨';
+      setTimeout(closeArtMenu, 700);
+    } else if (item.dataset.act === 'edit') {
+      closeArtMenu();
+      startArtifactEdit(a.id, a.title);
+    } else if (item.dataset.act === 'del') {
+      closeArtMenu();
+      if (!confirm('이 아티팩트를 삭제할까요? 공유된 링크도 함께 무효화됩니다.')) return;
+      await apiFetch('/api/artifacts/' + a.id, { method: 'DELETE' });
+      loadArtifacts().catch(reportErr);
+    } else if ('moveTo' in item.dataset) {
+      closeArtMenu();
+      moveArtifact(a.id, item.dataset.moveTo ? Number(item.dataset.moveTo) : null).catch(reportErr);
+    }
+  };
+}
+document.addEventListener('click', closeArtMenu);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeArtMenu(); });
+window.addEventListener('scroll', closeArtMenu, true);
+
+// 제자리 수정 모드 (v0.0.74) — 같은 링크(id)를 유지한 채 내용 교체. PUT = 전체 교체라
+// 자산이 있는 아티팩트는 수정 시에도 폴더를 다시 선택해야 한다 (안 하면 자산 삭제).
+let editingArtifactId = null;
+function startArtifactEdit(id, title) {
+  editingArtifactId = id;
+  document.getElementById('btn-art-upload').textContent = `수정하기 (#${id})`;
+  document.getElementById('art-edit-cancel').style.display = '';
+  document.getElementById('art-msg').textContent =
+    `✏️ "${title}" 수정 중 — 새 HTML(과 폴더)을 선택해 [수정하기]를 누르세요. 링크는 그대로 유지됩니다.`;
+  document.querySelector('.art-upload').scrollIntoView({ behavior: 'smooth' });
+}
+function cancelArtifactEdit() {
+  editingArtifactId = null;
+  document.getElementById('btn-art-upload').textContent = '올리기';
+  document.getElementById('art-edit-cancel').style.display = 'none';
+  document.getElementById('art-msg').textContent = '';
+}
+document.getElementById('art-edit-cancel').onclick = cancelArtifactEdit;
+
+async function uploadArtifact() {
+  const msg = document.getElementById('art-msg');
+  const fileInput = document.getElementById('art-file');
+  const dirInput = document.getElementById('art-dir');
+  const pasteArea = document.getElementById('art-paste');
+  // 폴더 파일 목록: [{file, relPath}] — relPath 는 선택한 폴더명이 첫 세그먼트
+  // (예: page_files/img.png) 라서 HTML 의 상대 참조와 그대로 일치한다.
+  let dirFiles = [...dirInput.files].map(f => ({ file: f, relPath: f.webkitRelativePath || f.name }));
+  let html = '', filename = '';
+  if (pasteArea.style.display !== 'none' && pasteArea.value.trim()) {
+    html = pasteArea.value;
+  } else if (fileInput.files.length) {
+    const f = fileInput.files[0];
+    if (f.size > 5 * 1024 * 1024) { msg.textContent = '❌ 5MB 제한을 초과했습니다.'; return; }
+    filename = f.name.replace(/\.html?$/i, '');
+    html = await f.text();
+  } else {
+    // 자동감지: html+_files 를 담은 상위 폴더를 통째로 선택한 경우 —
+    // 루트(2세그먼트)의 .html 을 본문으로 쓰고, 나머지 경로는 폴더명 세그먼트를 벗긴다.
+    const rootHtml = dirFiles.find(d => d.relPath.split('/').length === 2 && /\.html?$/i.test(d.relPath));
+    if (!rootHtml) { msg.textContent = '❌ HTML 파일을 선택하거나 붙여넣어 주세요.'; return; }
+    if (rootHtml.file.size > 5 * 1024 * 1024) { msg.textContent = '❌ HTML이 5MB 제한을 초과했습니다.'; return; }
+    filename = rootHtml.file.name.replace(/\.html?$/i, '');
+    html = await rootHtml.file.text();
+    dirFiles = dirFiles.filter(d => d !== rootHtml)
+      .map(d => ({ file: d.file, relPath: d.relPath.split('/').slice(1).join('/') }));
+  }
+  // 서버 제한(파일 5MB · 합계 25MB · 200개)을 넘기 전에 클라에서 먼저 안내 —
+  // 컨테이너 한도(40MB)에 걸리면 커넥션 중단으로 메시지 없이 실패한다.
+  if (dirFiles.length > 200) { msg.textContent = `❌ 폴더 파일이 너무 많습니다 (${dirFiles.length}개 > 200개 제한).`; return; }
+  const oversize = dirFiles.find(d => d.file.size > 5 * 1024 * 1024);
+  if (oversize) { msg.textContent = `❌ 파일이 5MB 제한을 초과했습니다: ${oversize.relPath}`; return; }
+  const total = dirFiles.reduce((s, d) => s + d.file.size, 0);
+  if (total > 25 * 1024 * 1024) { msg.textContent = `❌ 폴더 합계가 25MB 제한을 초과했습니다 (${(total/1024/1024).toFixed(1)}MB).`; return; }
+
+  msg.textContent = dirFiles.length ? `업로드 중… (파일 ${dirFiles.length}개)` : '업로드 중…';
+  try {
+    const title = document.getElementById('art-title').value;
+    // 수정 모드면 같은 id 에 PUT (링크 유지), 아니면 POST 신규
+    const url = editingArtifactId ? '/api/artifacts/' + editingArtifactId : '/api/artifacts';
+    const method = editingArtifactId ? 'PUT' : 'POST';
+    // 특정 폴더를 보고 있으면 그 폴더로 올린다 (v0.0.86). 수정(PUT)은 폴더를 바꾸지 않는다.
+    const uploadFolderId = /^\d+$/.test(artSelected) ? artSelected : null;
+    let res;
+    if (dirFiles.length) {
+      // 경로는 part filename 이 아니라 assetPaths 텍스트 필드로 — 인덱스 정렬 (서버와 계약)
+      const fd = new FormData();
+      fd.append('title', title); fd.append('filename', filename); fd.append('html', html);
+      if (uploadFolderId && !editingArtifactId) fd.append('folderId', uploadFolderId);
+      dirFiles.forEach(d => { fd.append('assets', d.file, d.file.name); fd.append('assetPaths', d.relPath); });
+      res = await apiFetch(url, { method, body: fd }); // Content-Type 은 브라우저가 boundary 포함 설정
+    } else {
+      res = await apiFetch(url, {
+        method, headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(uploadFolderId && !editingArtifactId
+          ? { title, html, filename, folderId: uploadFolderId } : { title, html, filename })
+      });
+    }
+    const body = await res.json();
+    if (!res.ok) { msg.textContent = '❌ ' + (body.error || 'HTTP ' + res.status); return; }
+    const done = editingArtifactId ? '✅ 수정했습니다 (링크 유지): ' : '✅ 올렸습니다: ';
+    if (editingArtifactId) cancelArtifactEdit(); // art-msg 를 지우므로 성공 메시지보다 먼저
+    msg.textContent = done + body.title + (body.assetCount ? ` (파일 ${body.assetCount}개)` : '');
+    document.getElementById('art-title').value = ''; fileInput.value = ''; dirInput.value = ''; pasteArea.value = '';
+    loadArtifacts().catch(reportErr);
+  } catch (e) { msg.textContent = '❌ 업로드 실패: ' + e.message; }
+}
+document.getElementById('btn-art-upload').onclick = () => uploadArtifact().catch(reportErr);
+document.getElementById('art-paste-toggle').onclick = () => {
+  const ta = document.getElementById('art-paste');
+  ta.style.display = ta.style.display === 'none' ? '' : 'none';
+};
+
+// 2단 탭 (v0.0.70): 상위 [지라봇|아티팩트]. 지라봇 → 하위 탭바 표시 + 마지막 하위 탭 복원.
+// 아티팩트 → 하위 탭바 숨김 + 아티팩트 패널 표시.
+let lastJirabotTab = 'overview';
+function showTopTab(name) {
+  document.querySelectorAll('.top-tab').forEach(t => t.classList.toggle('active', t.dataset.top === name));
+  const subNav = document.getElementById('tabs');
+  if (name === 'jirabot') {
+    subNav.style.display = '';
+    showTab(lastJirabotTab);
+  } else {
+    subNav.style.display = 'none';
+    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-artifacts'));
+    if (typeof loadArtifacts === 'function') loadArtifacts().catch(reportErr);
+  }
+}
+document.querySelectorAll('.top-tab').forEach(t => t.onclick = () => showTopTab(t.dataset.top));
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => { lastJirabotTab = t.dataset.tab; showTab(t.dataset.tab); });
 document.getElementById('trend-weeks').onchange = loadTrends;
 ['pr-repo', 'pr-author', 'pr-sort'].forEach(id =>
   document.getElementById(id).onchange = renderPrs);
@@ -444,6 +819,25 @@ document.getElementById('btn-filter').onclick = loadIssues;
 document.getElementById('f-q').addEventListener('keydown', e => { if (e.key === 'Enter') loadIssues(); });
 document.getElementById('wl-scope').onchange = loadWorkload;
 document.getElementById('bug-scope').onchange = loadBugs;
+document.getElementById('kb-q').addEventListener('input', renderKnowledge);
+['kb-category', 'kb-status'].forEach(id => document.getElementById(id).onchange = renderKnowledge);
+document.getElementById('btn-gh-add').onclick = async () => {
+  const githubLogin = document.getElementById('gh-login').value.trim();
+  const jiraDisplayName = document.getElementById('gh-jira').value.trim();
+  const msg = document.getElementById('gh-msg');
+  if (!githubLogin || !jiraDisplayName) {
+    msg.className = 'msg err'; msg.textContent = 'GitHub 로그인과 Jira 이름을 모두 입력하세요.'; return;
+  }
+  const res = await apiFetch('/api/github-mappings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ githubLogin, jiraDisplayName })
+  });
+  const d = await res.json();
+  if (!res.ok) { msg.className = 'msg err'; msg.textContent = d.error ?? '등록 실패'; return; }
+  msg.className = 'msg ok'; msg.textContent = `${d.status === 'created' ? '등록' : '갱신'} 완료`;
+  document.getElementById('gh-login').value = ''; document.getElementById('gh-jira').value = '';
+  loadGhMappings();
+};
 document.getElementById('issues-sort-key').onclick = () => {
   issueKeyDir = issueKeyDir === 'asc' ? 'desc' : 'asc';
   renderIssues();
@@ -465,7 +859,7 @@ document.getElementById('btn-import-pr').onclick = async () => {
   btn.disabled = true; btn.textContent = '분석 중…';
   msg.className = 'msg'; msg.textContent = 'PR 분석 중… (GitHub 조회 + 내용 분석 + Jira 전환, 잠시만요)';
   try {
-    const res = await fetch(API + '/actions/import-pr', {
+    const res = await apiFetch(API + '/actions/import-pr', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url })
     });
@@ -489,7 +883,7 @@ document.getElementById('btn-backfill').onclick = async () => {
   const msg = document.getElementById('trend-msg');
   btn.disabled = true; btn.textContent = '백필 중… (Jira 전체 조회)';
   try {
-    const res = await fetch(API + '/actions/backfill-history', { method: 'POST' });
+    const res = await apiFetch(API + '/actions/backfill-history', { method: 'POST' });
     const d = await res.json();
     msg.className = 'msg ok'; msg.textContent = d.result;
     loadTrends();
@@ -504,7 +898,7 @@ document.getElementById('btn-sync').onclick = async () => {
   const btn = document.getElementById('btn-sync');
   btn.disabled = true; btn.textContent = '동기화 중…';
   try {
-    const res = await fetch(API + '/actions/sync', { method: 'POST' });
+    const res = await apiFetch(API + '/actions/sync', { method: 'POST' });
     const d = await res.json();
     alert(d.result);
     showTab(document.querySelector('.tab.active').dataset.tab);
@@ -523,7 +917,7 @@ document.getElementById('btn-user-add').onclick = async () => {
   if (!slackUserId || !jiraDisplayName) {
     msg.className = 'msg err'; msg.textContent = 'Slack ID와 Jira 이름을 모두 입력하세요.'; return;
   }
-  const res = await fetch('/api/user-mappings', {
+  const res = await apiFetch('/api/user-mappings', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ slackUserId, jiraDisplayName })
   });
@@ -535,5 +929,79 @@ document.getElementById('btn-user-add').onclick = async () => {
   loadUsers();
 };
 
+// ===== 회원 관리 (v0.0.79, 관리자 전용) =====
+// 서버가 /api/admin/** 를 ROLE_ADMIN 으로 막으므로 탭 숨김은 UX 일 뿐 — 보안 경계는 서버.
+async function loadMe() {
+  const res = await apiFetch('/api/dashboard/me');
+  if (!res.ok) return;
+  const me = await res.json();
+  document.getElementById('me-name').textContent = '👤 ' + me.displayName + (me.admin ? '' : ` (${me.username})`);
+  // 관리자 전용 탭 (서버도 ROLE_ADMIN 으로 막는다 — 숨김은 UX)
+  document.getElementById('tab-members').hidden = !me.admin;
+  document.getElementById('tab-users').hidden = !me.admin;
+  meIsAdmin = me.admin;
+  if (artList.length || artFolders.length) renderArtFolders();   // 아티팩트 탭이 먼저 그려졌다면 🗑 반영
+}
+
+async function loadMembers() {
+  const res = await apiFetch('/api/admin/users');
+  if (!res.ok) throw new Error('/api/admin/users → HTTP ' + res.status);
+  const list = await res.json();
+  rows('table-members', list.map(u =>
+    `<tr><td>${esc(u.displayName)}</td><td>${esc(u.username)}</td>` +
+    `<td>${u.enabled ? '<span class="badge done">사용 중</span>' : '<span class="badge todo">비활성</span>'}</td>` +
+    `<td class="muted">${fmtDate(u.createdAt)}</td>` +
+    `<td><button class="btn" data-m-reset="${u.id}" data-m-user="${esc(u.username)}">비밀번호 초기화</button> ` +
+    `<button class="btn" data-m-toggle="${u.id}" data-m-enabled="${u.enabled}">${u.enabled ? '비활성화' : '활성화'}</button> ` +
+    `<button class="btn danger" data-m-del="${u.id}" data-m-user="${esc(u.username)}">삭제</button></td></tr>`).join('')
+    || '<tr><td colspan="5" class="muted">아직 만든 사용자가 없습니다</td></tr>');
+
+  const tbody = document.querySelector('#table-members tbody');
+  tbody.querySelectorAll('[data-m-reset]').forEach(b => b.onclick = async () => {
+    const pw = prompt(`${b.dataset.mUser} 의 새 비밀번호 (4자 이상, 평소 쓰지 않는 간단한 비밀번호)`);
+    if (!pw) return;
+    await memberPatch(b.dataset.mReset, { password: pw }, '비밀번호를 초기화했습니다');
+  });
+  tbody.querySelectorAll('[data-m-toggle]').forEach(b => b.onclick = () =>
+    memberPatch(b.dataset.mToggle, { enabled: b.dataset.mEnabled !== 'true' },
+      b.dataset.mEnabled === 'true' ? '비활성화했습니다 (즉시 로그인 불가)' : '활성화했습니다'));
+  tbody.querySelectorAll('[data-m-del]').forEach(b => b.onclick = async () => {
+    if (!confirm(`${b.dataset.mUser} 계정을 삭제할까요?`)) return;
+    const res = await apiFetch('/api/admin/users/' + b.dataset.mDel, { method: 'DELETE' });
+    memberMsg(res.ok ? 'ok' : 'err', res.ok ? '삭제했습니다' : '삭제 실패 (HTTP ' + res.status + ')');
+    loadMembers().catch(reportErr);
+  });
+}
+
+function memberMsg(cls, text) {
+  const msg = document.getElementById('member-msg');
+  msg.className = 'msg ' + cls; msg.textContent = text;
+}
+
+async function memberPatch(id, body, okText) {
+  const res = await apiFetch('/api/admin/users/' + id, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const d = await res.json().catch(() => ({}));
+  memberMsg(res.ok ? 'ok' : 'err', res.ok ? okText : (d.error ?? '실패 (HTTP ' + res.status + ')'));
+  loadMembers().catch(reportErr);
+}
+
+document.getElementById('btn-member-add').onclick = async () => {
+  const displayName = document.getElementById('m-name').value.trim();
+  const username = document.getElementById('m-username').value.trim();
+  const password = document.getElementById('m-password').value;
+  const res = await apiFetch('/api/admin/users', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ displayName, username, password })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) { memberMsg('err', d.error ?? '생성 실패 (HTTP ' + res.status + ')'); return; }
+  memberMsg('ok', `${d.displayName}(${d.username}) 계정을 만들었습니다 — 아이디/비밀번호를 본인에게 전달해주세요`);
+  ['m-name', 'm-username', 'm-password'].forEach(id => document.getElementById(id).value = '');
+  loadMembers().catch(reportErr);
+};
+
 /* 초기 로드 */
+loadMe().catch(reportErr);
 loadOverview().catch(reportErr);

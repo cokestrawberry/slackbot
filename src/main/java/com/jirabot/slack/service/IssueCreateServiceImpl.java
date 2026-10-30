@@ -110,8 +110,14 @@ public class IssueCreateServiceImpl implements IssueCreateService {
             String reporterName = mappingEntity.getJiraDisplayName();
             stage = System.nanoTime();
             String jiraAccountId = resolveJiraAccountId(mappingEntity);
-            JiraCreateResponse created = jira.createIssue(classification, reporterName, jiraAccountId);
+            // STUDY: "X epic 아래" 같은 상위 에픽 지정이 있으면 에픽 키를 찾아 parent 로 연결. 에픽 자신은 제외.
+            String parentKey = resolveParentEpic(classification);
+            JiraCreateResponse created =
+                    jira.createIssue(classification, reporterName, jiraAccountId, parentKey);
             timings.jiraMs = elapsedMs(stage);
+            if (parentKey != null) {
+                log.info("Issue {} linked under epic {}", created.key(), parentKey);
+            }
             String url = buildIssueUrl(created.key());
             log.info("Issue created key={} url={} type={} sp={}", created.key(), url,
                     classification.type(), classification.storyPoint());
@@ -289,5 +295,29 @@ public class IssueCreateServiceImpl implements IssueCreateService {
         }
         String trimmed = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
         return trimmed + "/browse/" + key;
+    }
+
+    // STUDY: 상위 에픽 해석 (v0.0.66) — 에픽명 "추출"은 Sonnet 스킬(skill-bug/story 의 parentEpicName,
+    //        원문 전체를 보므로 어순/조사 변형에 강함)이, 이름→키 "해석"은 Java(findEpicKeyByName,
+    //        정확→양방향 부분일치)가 담당. 기존 EPIC_BEFORE/AFTER 정규식 추출을 대체.
+    //        에픽 자신 생성이면 parent 없음. 못 찾으면 parent 없이 생성(비치명적).
+    private String resolveParentEpic(IssueClassification classification) {
+        if (classification.type() == IssueClassification.IssueType.EPIC) {
+            return null;
+        }
+        String epicName = classification.parentEpicName();
+        if (epicName == null || epicName.isBlank()) {
+            return null;
+        }
+        try {
+            var key = jira.findEpicKeyByName(epicName.strip());
+            if (key.isEmpty()) {
+                log.info("Parent epic not found by name '{}' — creating without parent", epicName);
+            }
+            return key.orElse(null);
+        } catch (Exception e) {
+            log.warn("에픽 조회 실패 '{}': {}", epicName, e.toString());
+            return null;
+        }
     }
 }

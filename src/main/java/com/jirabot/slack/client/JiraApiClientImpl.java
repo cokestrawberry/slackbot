@@ -48,7 +48,15 @@ public class JiraApiClientImpl implements JiraApiClient {
             backoff = @Backoff(delay = 500, multiplier = 2.0))
     public JiraCreateResponse createIssue(IssueClassification classification, String reporterName,
                                           String jiraAccountId) {
-        Map<String, Object> request = buildRequest(classification, reporterName, jiraAccountId);
+        return createIssue(classification, reporterName, jiraAccountId, null);
+    }
+
+    @Override
+    @Retryable(retryFor = JiraTransientException.class, maxAttempts = 3,
+            backoff = @Backoff(delay = 500, multiplier = 2.0))
+    public JiraCreateResponse createIssue(IssueClassification classification, String reporterName,
+                                          String jiraAccountId, String parentKey) {
+        Map<String, Object> request = buildRequest(classification, reporterName, jiraAccountId, parentKey);
         try {
             JiraCreateResponse resp = jiraWebClient.post()
                     .uri("/rest/api/3/issue")
@@ -59,7 +67,7 @@ public class JiraApiClientImpl implements JiraApiClient {
             if (resp == null || resp.key() == null) {
                 throw new JiraApiException("Jira returned empty response");
             }
-            log.info("Jira issue created key={} reporter={}", resp.key(), reporterName);
+            log.info("Jira issue created key={} reporter={} parent={}", resp.key(), reporterName, parentKey);
             return resp;
         } catch (WebClientResponseException e) {
             int status = e.getStatusCode().value();
@@ -78,7 +86,7 @@ public class JiraApiClientImpl implements JiraApiClient {
     // STUDY: SP 커스텀 필드 ID가 사이트마다 다르므로 @JsonProperty 고정이 불가.
     //        Map으로 빌드하면 동적 필드명을 자유롭게 추가할 수 있다.
     private Map<String, Object> buildRequest(IssueClassification c, String reporterName,
-                                             String jiraAccountId) {
+                                             String jiraAccountId, String parentKey) {
         // STUDY: 이슈 타입명은 분류에 따라 매핑. EPIC 은 키워드 트리거로만 강제되는 특이 케이스.
         String issueTypeName = switch (c.type()) {
             case BUG -> props.issueTypes().bug();
@@ -92,7 +100,7 @@ public class JiraApiClientImpl implements JiraApiClient {
 
         Map<String, Object> fields = new java.util.HashMap<>();
         fields.put("project", Map.of("key", props.projectKey()));
-        fields.put("summary", c.title());
+        fields.put("summary", singleLine(c.title()));
         fields.put("issuetype", Map.of("name", issueTypeName));
         fields.put("description", buildAdfDescription(c, reporterName));
         // STUDY: 에픽은 컨테이너성 이슈라 Story Point 를 부여하지 않는다. 일부 Jira 설정은
@@ -109,7 +117,48 @@ public class JiraApiClientImpl implements JiraApiClient {
             fields.put("reporter", accountRef);
             fields.put("assignee", accountRef);
         }
+        // STUDY: 상위 에픽 연결 — 이 사이트는 fields.parent.key 로 task→epic 을 잇는다(실측). 에픽 자신엔 안 붙인다.
+        if (parentKey != null && !parentKey.isBlank() && !isEpic) {
+            fields.put("parent", Map.of("key", parentKey));
+        }
         return Map.of("fields", fields);
+    }
+
+    @Override
+    public java.util.Optional<String> findEpicKeyByName(String epicName) {
+        // issuetype=Epic 은 영문 정식명이라 JQL 매칭됨(L7).
+        return findKeyByName(epicName,
+                "project = " + props.projectKey() + " AND issuetype = Epic ORDER BY created DESC");
+    }
+
+    @Override
+    public java.util.Optional<String> findIssueKeyByName(String name) {
+        // STUDY: 하위작업 부모 후보 — 에픽은 제외(하위작업은 에픽 직속이 될 수 없음). issuetype != Epic 은
+        //        영문 정식명(L7). 서브태스크 부모 여부는 호출부(getIssue().subtask())에서 재확인하므로
+        //        JQL 에는 존재하지 않을 수 있는 Sub-task 타입명을 넣지 않는다(오타 시 JQL 400 방지).
+        return findKeyByName(name,
+                "project = " + props.projectKey() + " AND issuetype != Epic ORDER BY created DESC");
+    }
+
+    // STUDY: 요약(summary)으로 이슈 키를 찾는 공용 로직. 정확 일치 우선, 없으면 양방향 부분 일치.
+    //        양방향: 추출 구절이 요약을 포함(넓게 잡힌 경우)하거나 그 반대.
+    private java.util.Optional<String> findKeyByName(String name, String jql) {
+        if (name == null || name.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        String needle = name.strip().toLowerCase();
+        String partial = null;
+        for (SprintIssue e : searchByJql(jql)) {
+            String s = e.summary() == null ? "" : e.summary().strip();
+            if (s.equalsIgnoreCase(name.strip())) {
+                return java.util.Optional.of(e.key());
+            }
+            String sl = s.toLowerCase();
+            if (partial == null && !sl.isEmpty() && (sl.contains(needle) || needle.contains(sl))) {
+                partial = e.key();
+            }
+        }
+        return java.util.Optional.ofNullable(partial);
     }
 
     @Override
@@ -130,6 +179,139 @@ public class JiraApiClientImpl implements JiraApiClient {
         } catch (Exception e) {
             log.warn("Failed to search Jira user '{}': {}", displayName, e.toString());
             return null;
+        }
+    }
+
+    // STUDY: 이슈 링크 타입은 사이트 설정이라 거의 안 변함 → 캐시. self-invocation 주의(외부 빈에서 호출돼야 캐시 탐).
+    @Override
+    @org.springframework.cache.annotation.Cacheable(com.jirabot.slack.config.CacheConfig.ISSUE_LINK_TYPES_CACHE)
+    public List<com.jirabot.slack.client.dto.IssueLinkType> getIssueLinkTypes() {
+        List<com.jirabot.slack.client.dto.IssueLinkType> result = new ArrayList<>();
+        try {
+            String json = jiraWebClient.get()
+                    .uri("/rest/api/3/issueLinkType")
+                    .retrieve().bodyToMono(String.class).block();
+            JsonNode types = objectMapper.readTree(json).path("issueLinkTypes");
+            for (JsonNode t : types) {
+                result.add(new com.jirabot.slack.client.dto.IssueLinkType(
+                        t.path("id").asText(null),
+                        t.path("name").asText(null),
+                        t.path("inward").asText(null),
+                        t.path("outward").asText(null)));
+            }
+        } catch (Exception e) {
+            log.error("Failed to fetch issue link types: {}", e.toString());
+        }
+        return result;
+    }
+
+    // STUDY: 링크 방향 — {inwardIssue <inward> outwardIssue}. Blocks 는 outwardIssue 가 inwardIssue 를 막는다.
+    //        POST /rest/api/3/issueLink 는 201(No Content) 반환. 실패 시 false.
+    @Override
+    public boolean linkIssues(String inwardKey, String outwardKey, String linkTypeName) {
+        try {
+            var body = Map.of(
+                    "type", Map.of("name", linkTypeName),
+                    "inwardIssue", Map.of("key", inwardKey),
+                    "outwardIssue", Map.of("key", outwardKey));
+            jiraWebClient.post()
+                    .uri("/rest/api/3/issueLink")
+                    .bodyValue(body)
+                    .retrieve().bodyToMono(String.class).block();
+            log.info("Linked {} <-{}- {} (inward<-type-outward)", inwardKey, linkTypeName, outwardKey);
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to link {} and {} ({}): {}", inwardKey, outwardKey, linkTypeName, e.toString());
+            return false;
+        }
+    }
+
+    // STUDY: 우선순위 목록도 사이트 설정이라 거의 안 변함 → 캐시.
+    @Override
+    @org.springframework.cache.annotation.Cacheable(com.jirabot.slack.config.CacheConfig.PRIORITIES_CACHE)
+    public List<com.jirabot.slack.client.dto.PriorityInfo> getPriorities() {
+        List<com.jirabot.slack.client.dto.PriorityInfo> result = new ArrayList<>();
+        try {
+            String json = jiraWebClient.get()
+                    .uri("/rest/api/3/priority")
+                    .retrieve().bodyToMono(String.class).block();
+            JsonNode arr = objectMapper.readTree(json);
+            for (JsonNode p : arr) {
+                result.add(new com.jirabot.slack.client.dto.PriorityInfo(
+                        p.path("id").asText(null), p.path("name").asText(null)));
+            }
+        } catch (Exception e) {
+            log.error("Failed to fetch priorities: {}", e.toString());
+        }
+        return result;
+    }
+
+    // STUDY: 이슈 필드 부분 갱신 — PUT /rest/api/3/issue/{key} 는 204(No Content). 실패 시 false.
+    @Override
+    public boolean updateIssueFields(String issueKey, Map<String, Object> fields) {
+        try {
+            jiraWebClient.put()
+                    .uri("/rest/api/3/issue/{key}", issueKey)
+                    .bodyValue(Map.of("fields", fields))
+                    .retrieve().bodyToMono(String.class).block();
+            log.info("Updated fields on {}: {}", issueKey, fields.keySet());
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to update fields on {}: {}", issueKey, e.toString());
+            return false;
+        }
+    }
+
+    // STUDY: 이슈 링크 목록 — issuelinks 항목은 조회자 상대적. outwardIssue 가 있으면 this→outward→그 이슈,
+    //        inwardIssue 가 있으면 this→inward→그 이슈. 상대 이슈/관계 설명/링크 ID 를 추출한다.
+    @Override
+    public List<com.jirabot.slack.client.dto.IssueLinkInfo> getIssueLinks(String issueKey) {
+        List<com.jirabot.slack.client.dto.IssueLinkInfo> result = new ArrayList<>();
+        try {
+            String json = jiraWebClient.get()
+                    .uri("/rest/api/3/issue/{key}?fields=issuelinks", issueKey)
+                    .retrieve().bodyToMono(String.class).block();
+            JsonNode links = objectMapper.readTree(json).path("fields").path("issuelinks");
+            for (JsonNode link : links) {
+                String linkId = link.path("id").asText(null);
+                JsonNode type = link.path("type");
+                JsonNode outward = link.path("outwardIssue");
+                JsonNode inward = link.path("inwardIssue");
+                String desc;
+                JsonNode other;
+                if (!outward.isMissingNode() && !outward.isNull()) {
+                    desc = type.path("outward").asText("");
+                    other = outward;
+                } else {
+                    desc = type.path("inward").asText("");
+                    other = inward;
+                }
+                if (other.isMissingNode() || other.isNull()) {
+                    continue;
+                }
+                result.add(new com.jirabot.slack.client.dto.IssueLinkInfo(
+                        linkId, desc,
+                        other.path("key").asText(null),
+                        other.path("fields").path("summary").asText(null)));
+            }
+        } catch (Exception e) {
+            log.error("Failed to fetch issue links for {}: {}", issueKey, e.toString());
+        }
+        return result;
+    }
+
+    // STUDY: 링크 삭제 — DELETE /rest/api/3/issueLink/{id} 는 204. 실패 시 false.
+    @Override
+    public boolean deleteIssueLink(String linkId) {
+        try {
+            jiraWebClient.delete()
+                    .uri("/rest/api/3/issueLink/{id}", linkId)
+                    .retrieve().bodyToMono(String.class).block();
+            log.info("Deleted issue link {}", linkId);
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to delete issue link {}: {}", linkId, e.toString());
+            return false;
         }
     }
 
@@ -274,6 +456,12 @@ public class JiraApiClientImpl implements JiraApiClient {
                 firstNonBlankDate(f.path("resolutiondate"), f.path("statuscategorychangedate")));
     }
 
+    // STUDY: Jira summary 필드는 개행을 하드 거부(400 "개행 문자를 포함…"). 어떤 경로로 왔든
+    //        Jira 로 나가는 최종 지점에서 한 줄로 접는다 (v0.0.64 실사고의 마지막 방어선).
+    private static String singleLine(String s) {
+        return s == null ? null : s.replaceAll("[\\r\\n]+", " ").strip();
+    }
+
     private static String firstNonBlankDate(JsonNode... nodes) {
         for (JsonNode n : nodes) {
             if (n != null && !n.isMissingNode() && !n.isNull()) {
@@ -407,7 +595,7 @@ public class JiraApiClientImpl implements JiraApiClient {
             Map<String, Object> fields = new java.util.HashMap<>(Map.of(
                     "project", Map.of("key", props.projectKey()),
                     "parent", Map.of("key", parentKey),
-                    "summary", summary,
+                    "summary", singleLine(summary),
                     "issuetype", Map.of("name", props.issueTypes().subtask()),
                     props.storyPointField(), (double) storyPoint
             ));

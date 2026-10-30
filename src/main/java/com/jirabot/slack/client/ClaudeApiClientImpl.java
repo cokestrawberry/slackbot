@@ -3,6 +3,7 @@ package com.jirabot.slack.client;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jirabot.slack.client.dto.BugCategoryResult;
 import com.jirabot.slack.client.dto.BugResolutionSummary;
 import com.jirabot.slack.client.dto.IntentResult;
 import com.jirabot.slack.client.dto.IssueClassification;
@@ -42,7 +43,9 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
               재현/원인 조사가 여러 단계로 불확실하면 한 단계 올린다.
             - 8 is the maximum. Never output 13 or higher. If the work clearly exceeds 8
               (에픽급, 분할 필요), still output 8 — it is the signal that the item should be split.
-            - title: <= 120 Korean/English characters, imperative mood.
+            - title: <= 120 Korean/English characters, imperative mood. Describe ONLY the problem/request.
+              Never include command/request phrasing ("티켓/이슈 만들어줘", "등록해줘", "~생겼는데") or any
+              issue key ("[ES2-123]") in the title — strip them.
             - summary: 1-2 concise paragraphs summarizing the problem/request.
             - An INTENT HINT may be provided above the user input.
               Use it as a strong signal but override if the text clearly contradicts it.
@@ -79,9 +82,17 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
     //        (2) stdin 은 순수 사용자 입력만 — 프롬프트 인젝션 경계 명확, (3) 프롬프트 수정에 재빌드 불필요.
     //        파일이 없으면(부분 배포 등) 기존 인라인 상수 + stdin 합본 방식으로 폴백해 무중단을 보장한다.
     static final String CLASSIFIER_PROMPT_FILE = "prompts/sonnet-classifier.md";
+    // STUDY: 의도별 전용 스킬(v0.0.60) — Haiku 의도 분류 결과에 따라 버그/스토리 특화 프롬프트를 선택한다.
+    //        버그: 현상→재현→영향→단서 구조 + 로그/에러코드 원문 보존. 스토리: 목적→요구사항→완료 조건(AC).
+    //        PR import: 회고 등록 관점(요청문 아님) + 템플릿 잡음 제거 + SP 무시(기간 기반으로 대체됨).
+    static final String BUG_SKILL_PROMPT_FILE = "prompts/skill-bug.md";
+    static final String STORY_SKILL_PROMPT_FILE = "prompts/skill-story.md";
+    static final String PR_IMPORT_PROMPT_FILE = "prompts/skill-pr-import.md";
+    static final String ISSUE_ACTION_PROMPT_FILE = "prompts/skill-issue-action.md";
     static final String RESOLUTION_PROMPT_FILE = "prompts/sonnet-resolution.md";
     static final String BRANCH_SLUG_PROMPT_FILE = "prompts/haiku-branch-slug.md";
     static final String SEARCH_PROMPT_FILE = "prompts/sonnet-issue-search.md";
+    static final String BUG_CATEGORY_PROMPT_FILE = "prompts/bug-category.md";
 
     private static boolean promptFileExists(String path) {
         try {
@@ -108,20 +119,109 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
         return classify(rawText, null);
     }
 
+    // 한 번의 시도 결과. (타임아웃도 재시도 대상 — 신뢰성 우선, 응답 즉시성보다 정확 분류 우선.)
+    private enum Outcome { OK, RETRYABLE, TIMEOUT }
+    private record Attempt(Outcome outcome, IssueClassification result) {}
+
+    // STUDY: Sonnet CLI 가 간헐적으로 exit≠0/빈출력/파싱실패/타임아웃으로 떨어진다(원문이 제목 되는 fallback 유발).
+    //        분류 결과 정확도가 응답 속도보다 중요하므로(비동기 처리라 Slack ack 와 무관) 최대 3회까지 재시도.
+    static final int MAX_ATTEMPTS = 3;
+
     @Override
     public IssueClassification classify(String rawText, IntentResult intentHint) {
         if (rawText == null || rawText.isBlank()) {
             return IssueClassification.fallback(rawText);
         }
+        String promptFile = classifierPromptFileFor(intentHint);
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            Attempt a = attemptClassify(rawText, intentHint, promptFile);
+            if (a.outcome() == Outcome.OK) {
+                return a.result();
+            }
+            if (attempt < MAX_ATTEMPTS) {
+                log.info("Claude classify {} (attempt {}/{}) → 재시도", a.outcome(), attempt, MAX_ATTEMPTS);
+            }
+        }
+        log.warn("Claude classify {}회 모두 실패 → fallback", MAX_ATTEMPTS);
+        return fallbackForIntent(rawText, intentHint);
+    }
+
+    // STUDY: 완료된 PR의 회고 등록용 분류 — PR 전용 스킬(회고 관점, 템플릿 잡음 제거)을 쓴다.
+    //        SP 는 호출부(PrImportServiceImpl)가 기간 기반으로 덮어쓰므로 스킬은 type/title/summary 에 집중.
+    @Override
+    public IssueClassification classifyPr(String rawText) {
+        if (rawText == null || rawText.isBlank()) {
+            return IssueClassification.fallback(rawText);
+        }
+        String promptFile = promptFileExists(PR_IMPORT_PROMPT_FILE) ? PR_IMPORT_PROMPT_FILE
+                : promptFileExists(CLASSIFIER_PROMPT_FILE) ? CLASSIFIER_PROMPT_FILE : null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            Attempt a = attemptClassify(rawText, null, promptFile);
+            if (a.outcome() == Outcome.OK) {
+                return a.result();
+            }
+            if (attempt < MAX_ATTEMPTS) {
+                log.info("Claude classifyPr {} (attempt {}/{}) → 재시도", a.outcome(), attempt, MAX_ATTEMPTS);
+            }
+        }
+        log.warn("Claude classifyPr {}회 모두 실패 → fallback", MAX_ATTEMPTS);
+        return IssueClassification.fallback(rawText);
+    }
+
+    // STUDY: NL 이슈 조작 명령 → 구조화 액션 추출 (extract-then-execute 의 extract 단).
+    //        조작(mutation)은 안내 폴백이 있으므로 재시도 1회(총 2회) — 생성(3회)보다 짧게.
+    //        JSON 필수 필드(action) 검증은 IssueActionSpec compact ctor 가 none 으로 강등해 흡수.
+    @Override
+    public com.jirabot.slack.client.dto.IssueActionSpec extractIssueAction(String rawText) {
+        if (rawText == null || rawText.isBlank() || !promptFileExists(ISSUE_ACTION_PROMPT_FILE)) {
+            return com.jirabot.slack.client.dto.IssueActionSpec.none();
+        }
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                ProcessRunner.Result result = processRunner.run(
+                        buildCommand(props.model(), ISSUE_ACTION_PROMPT_FILE),
+                        "USER INPUT:\n" + rawText,
+                        Duration.ofSeconds(props.timeoutSeconds()));
+                if (result.timedOut() || result.exitCode() != 0
+                        || result.stdout() == null || result.stdout().isBlank()) {
+                    log.warn("issue-action extract failed (timeout={}, exit={}, attempt {}/2)",
+                            result.timedOut(), result.exitCode(), attempt);
+                    continue;
+                }
+                JsonNode env = objectMapper.readTree(result.stdout());
+                if (env.path("is_error").asBoolean(false)) continue;
+                String inner = env.path("result").asText("");
+                if (inner.isBlank()) continue;
+                return objectMapper.readValue(stripToJsonObject(inner),
+                        com.jirabot.slack.client.dto.IssueActionSpec.class);
+            } catch (Exception e) {
+                log.warn("issue-action extract error (attempt {}/2): {}", attempt, e.toString());
+            }
+        }
+        return com.jirabot.slack.client.dto.IssueActionSpec.none();
+    }
+
+    // STUDY: 의도별 스킬 파일 선택 — 2단 폴백: 전용 스킬 없으면 공용(sonnet-classifier.md),
+    //        그것도 없으면 null(인라인 SYSTEM_PROMPT 폴백). 부분 배포에도 무중단.
+    //        에픽/무힌트/스레드 하위작업(register_story 힌트)은 각각 공용/스토리 스킬로 자연 귀결된다.
+    String classifierPromptFileFor(IntentResult intentHint) {
+        String intent = intentHint != null ? intentHint.intent() : null;
+        String skill = "register_bug".equals(intent) ? BUG_SKILL_PROMPT_FILE
+                : "register_story".equals(intent) ? STORY_SKILL_PROMPT_FILE
+                : null;
+        if (skill != null && promptFileExists(skill)) {
+            return skill;
+        }
+        return promptFileExists(CLASSIFIER_PROMPT_FILE) ? CLASSIFIER_PROMPT_FILE : null;
+    }
+
+    private Attempt attemptClassify(String rawText, IntentResult intentHint, String promptFile) {
         try {
             // STUDY: stdin 으로 프롬프트 전달 — argv 는 shell 이스케이프/플랫폼별 길이 제한 이슈 회피.
-            //        한국어/개행/따옴표가 섞여도 byte-safe.
             //        skill 파일이 있으면 시스템 프롬프트는 --system-prompt-file 로, stdin 은 사용자 입력만.
-            boolean useFile = promptFileExists(CLASSIFIER_PROMPT_FILE);
-            List<String> command = buildCommand(props.model(), useFile ? CLASSIFIER_PROMPT_FILE : null);
+            boolean useFile = promptFile != null;
+            List<String> command = buildCommand(props.model(), promptFile);
 
-            // STUDY: intentHint 가 있으면 INTENT HINT 블록을 삽입하여 Haiku 분류 결과를 Sonnet 에게 전달한다.
-            //        confidence 가 낮거나 hint 가 없으면 기존 포맷 유지.
             String hintBlock = (intentHint != null && intentHint.intent() != null && !intentHint.intent().isBlank())
                     ? "INTENT HINT: " + intentHint.intent() + " (confidence: " + intentHint.confidence() + ")\n---\n"
                     : "";
@@ -129,27 +229,40 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
                     ? hintBlock + "USER INPUT:\n" + rawText
                     : SYSTEM_PROMPT + "\n\n---\n" + hintBlock + "USER INPUT:\n" + rawText;
 
-            Duration timeout = Duration.ofSeconds(props.timeoutSeconds());
-
-            ProcessRunner.Result result = processRunner.run(command, stdin, timeout);
+            ProcessRunner.Result result =
+                    processRunner.run(command, stdin, Duration.ofSeconds(props.timeoutSeconds()));
 
             if (result.timedOut()) {
                 log.warn("Claude CLI timed out after {}s", props.timeoutSeconds());
-                return IssueClassification.fallback(rawText);
+                return new Attempt(Outcome.TIMEOUT, null);
             }
             if (result.exitCode() != 0) {
                 log.warn("Claude CLI exited with code={} stderr={}", result.exitCode(), truncate(result.stderr()));
-                return IssueClassification.fallback(rawText);
+                return new Attempt(Outcome.RETRYABLE, null);
             }
             if (result.stdout() == null || result.stdout().isBlank()) {
                 log.warn("Claude CLI returned empty stdout");
-                return IssueClassification.fallback(rawText);
+                return new Attempt(Outcome.RETRYABLE, null);
             }
-            return parseEnvelope(result.stdout(), rawText);
+            IssueClassification parsed = parseEnvelopeOrNull(result.stdout());
+            return parsed != null ? new Attempt(Outcome.OK, parsed) : new Attempt(Outcome.RETRYABLE, null);
         } catch (Exception e) {
-            log.warn("Claude classify failed, using fallback. err={}", e.toString());
-            return IssueClassification.fallback(rawText);
+            log.warn("Claude classify attempt failed: {}", e.toString());
+            return new Attempt(Outcome.RETRYABLE, null);
         }
+    }
+
+    // 분류 최종 실패 시 Haiku 의도로 type 을 추정해 fallback (register_bug→BUG, register_story→FEATURE, else OTHER).
+    private IssueClassification fallbackForIntent(String rawText, IntentResult intentHint) {
+        IssueClassification.IssueType type = IssueClassification.IssueType.OTHER;
+        if (intentHint != null && intentHint.intent() != null) {
+            type = switch (intentHint.intent()) {
+                case "register_bug" -> IssueClassification.IssueType.BUG;
+                case "register_story" -> IssueClassification.IssueType.FEATURE;
+                default -> IssueClassification.IssueType.OTHER;
+            };
+        }
+        return IssueClassification.fallback(rawText, type);
     }
 
     // STUDY: Sonnet 기반 의미 검색. 전체 이슈 목록을 Sonnet에게 전달하여 사용자 질문과 관련도 높은 이슈를 선별한다.
@@ -341,6 +454,37 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
         }
     }
 
+    // STUDY: 버그 원인 카테고리 분류. 가벼운 택1 작업이라 fast-model(Haiku) 사용. 실패는 비치명적(empty 반환,
+    //        카테고리 속성만 비고 나머지 적재는 진행). prompts/bug-category.md 없으면 분류 생략.
+    @Override
+    public BugCategoryResult classifyBugCategory(String summary, String description) {
+        if (!promptFileExists(BUG_CATEGORY_PROMPT_FILE)) {
+            log.warn("bug-category prompt file missing; skip categorization");
+            return BugCategoryResult.empty();
+        }
+        try {
+            String stdin = "TITLE: " + (summary == null ? "" : summary) + "\n\nDESCRIPTION:\n"
+                    + (description == null || description.isBlank() ? "(none)" : description);
+            ProcessRunner.Result result = processRunner.run(
+                    buildCommand(props.fastModel(), BUG_CATEGORY_PROMPT_FILE),
+                    stdin, Duration.ofSeconds(props.timeoutSeconds()));
+            if (result.timedOut() || result.exitCode() != 0
+                    || result.stdout() == null || result.stdout().isBlank()) {
+                log.warn("bug category classify failed (timeout={}, exit={})",
+                        result.timedOut(), result.exitCode());
+                return BugCategoryResult.empty();
+            }
+            JsonNode env = objectMapper.readTree(result.stdout());
+            if (env.path("is_error").asBoolean(false)) return BugCategoryResult.empty();
+            String inner = env.path("result").asText("");
+            if (inner.isBlank()) return BugCategoryResult.empty();
+            return objectMapper.readValue(stripToJsonObject(inner), BugCategoryResult.class);
+        } catch (Exception e) {
+            log.warn("bug category classify error: {}", e.toString());
+            return BugCategoryResult.empty();
+        }
+    }
+
     // STUDY: 한글(또는 임의 언어) 이슈 요약을 영어 git 브랜치 슬러그로 변환. classify 와 동일한 CLI 패턴.
     static final String BRANCH_SLUG_PROMPT = """
             You convert a Jira issue summary into a concise English git branch slug.
@@ -389,6 +533,7 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
         // STUDY: --max-turns 1 → 모델이 단 한 번의 응답만 내놓도록 보장 (도구 반복 호출 루프 차단).
         // STUDY: --permission-mode plan → CLI 자체가 파일/쉘 도구 실행을 거부. 분류 전용 호출에 적합.
         // STUDY: --system-prompt-file → 디스크 skill 파일을 system 롤로 전달 (IntentClassifierImpl 과 동일 패턴).
+        // STUDY: LEAN_FLAGS — 도구 스키마/CLAUDE.md/동적 섹션 제거 + 세션 기록 중단 (ClaudeCliFlags 참고).
         List<String> cmd = new java.util.ArrayList<>(List.of(
                 props.cliPath(), "-p",
                 "--output-format", "json",
@@ -396,6 +541,7 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
                 "--max-turns", String.valueOf(props.maxTurns()),
                 "--model", model
         ));
+        cmd.addAll(com.jirabot.slack.client.process.ClaudeCliFlags.LEAN_FLAGS);
         if (systemPromptFile != null) {
             cmd.add("--system-prompt-file");
             cmd.add(systemPromptFile);
@@ -403,29 +549,38 @@ public class ClaudeApiClientImpl implements ClaudeApiClient {
         return cmd;
     }
 
-    private IssueClassification parseEnvelope(String stdout, String rawText) {
+    // 파싱 실패/에러 응답이면 null 반환(호출부가 재시도 판단). 성공 시에만 분류 결과 반환.
+    private IssueClassification parseEnvelopeOrNull(String stdout) {
         JsonNode envelope;
         try {
             envelope = objectMapper.readTree(stdout);
         } catch (Exception e) {
             log.warn("Claude CLI envelope parse failed: {} head={}", e.toString(), truncate(stdout));
-            return IssueClassification.fallback(rawText);
+            return null;
         }
         if (envelope.path("is_error").asBoolean(false)) {
             log.warn("Claude CLI reported is_error=true, envelope head={}", truncate(stdout));
-            return IssueClassification.fallback(rawText);
+            return null;
         }
         String inner = envelope.path("result").asText("");
         if (inner == null || inner.isBlank()) {
             log.warn("Claude CLI envelope has blank result");
-            return IssueClassification.fallback(rawText);
+            return null;
         }
         String stripped = stripToJsonObject(inner);
         try {
-            return objectMapper.readValue(stripped, IssueClassification.class);
+            IssueClassification parsed = objectMapper.readValue(stripped, IssueClassification.class);
+            // STUDY: JSON 으로는 유효하지만 필수 필드가 빠진 응답(예: 다른 키만 있는 오브젝트)이 그대로
+            //        통과하면 "null" 제목 티켓이 생긴다(스킬 eval 에서 실측). 검증 실패 → null → 재시도.
+            if (parsed.type() == null || parsed.title() == null || parsed.title().isBlank()
+                    || !java.util.Set.of(1, 2, 3, 5, 8).contains(parsed.storyPoint())) {
+                log.warn("Claude classification missing/invalid fields, head={}", truncate(stripped));
+                return null;
+            }
+            return parsed;
         } catch (Exception e) {
             log.warn("Claude inner JSON parse failed: {} head={}", e.toString(), truncate(stripped));
-            return IssueClassification.fallback(rawText);
+            return null;
         }
     }
 
